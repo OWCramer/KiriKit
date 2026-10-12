@@ -1,0 +1,20 @@
+{
+    "name": "shiori-krkr",
+    "version-string": "0.1.0",
+    "description": "Dependencies of Shiori's krkrsdl3-based KiriKiri engine. FFmpeg is left out for now: movies come later on Shiori's own LGPL FFmpeg.",
+    "dependencies": [
+        "oniguruma",
+        "zlib",
+        "libpng",
+        "libwebp",
+        "libjpeg-turbo",
+        "libvorbis",
+        "opusfile",
+        "freetype",
+        "plutovg",
+        "sdl3",
+        "sdl3-ttf",
+        "glm"
+    ],
+    "builtin-baseline": "8e8dfb4ba483886936ded5ca201b500b8d8b0096"
+}

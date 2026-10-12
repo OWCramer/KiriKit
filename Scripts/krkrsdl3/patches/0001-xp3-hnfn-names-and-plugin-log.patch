@@ -1,0 +1,99 @@
+diff --git a/core/archive/XP3Archive.cpp b/core/archive/XP3Archive.cpp
+index 7612aff..5d8de76 100644
+--- a/core/archive/XP3Archive.cpp
++++ b/core/archive/XP3Archive.cpp
+@@ -21,6 +21,8 @@
+ #include "PlatformMutex.h"
+ 
+ #include <zlib.h>
++#include <unordered_map>
++#include <unordered_set>
+ 
+ //---------------------------------------------------------------------------
+ // archive filter related
+@@ -256,6 +258,34 @@ void tTVPXP3Archive::Init(tTJSBinaryStream* st, tjs_int64 off, bool normalizeNam
+                 TVPThrowExceptionMessage(TVPReadError);
+             }
+ 
++            // 'hnfn' chunks (archives whose File entries carry hashed names): each maps an
++            // entry's adlr hash to its real name (u32 hash, u16 length, UTF-16 name).
++            static const tjs_uint8 cn_hnfn[] = {0x68 /*'h'*/, 0x6e /*'n'*/, 0x66 /*'f'*/, 0x6e /*'n'*/};
++            std::unordered_map<tjs_uint32, ttstr> hashed_names;
++            std::unordered_set<std::string> hashed_name_set; // normalized
++            {
++                tjs_uint ch_start = 0;
++                tjs_uint ch_size = index_size;
++                while (FindChunk(indexdata, cn_hnfn, ch_start, ch_size))
++                {
++                    if (ch_size >= 6)
++                    {
++                        tjs_uint32 hash = ReadI32FromMem(indexdata + ch_start);
++                        tjs_uint len = ReadI16FromMem(indexdata + ch_start + 4);
++                        if (6 + len * 2 <= ch_size)
++                        {
++                            ttstr real = TVPStringFromBMPUnicode(
++                                (const tjs_uint16*)(indexdata + ch_start + 6), len);
++                            hashed_names[hash] = real;
++                            NormalizeInArchiveStorageName(real);
++                            hashed_name_set.insert(real.AsStdString());
++                        }
++                    }
++                    ch_start += ch_size;
++                    ch_size = index_size - ch_start;
++                }
++            }
++
+             // read index information from memory
+             tjs_uint ch_file_start = 0;
+             tjs_uint ch_file_size = index_size;
+@@ -331,14 +361,35 @@ void tTVPXP3Archive::Init(tTJSBinaryStream* st, tjs_int64 off, bool normalizeNam
+ 
+                 // read 'aldr' sub-chunk
+                 item.FileHash = ReadI32FromMem(indexdata + ch_adlr_start);
++                bool decoy = false;
++                if (!hashed_names.empty())
++                {
++                    auto real = hashed_names.find(item.FileHash);
++                    if (real != hashed_names.end())
++                    {
++                        item.Name = real->second;
++                        if (normalizeName)
++                            NormalizeInArchiveStorageName(item.Name);
++                    }
++                    else
++                    {
++                        // A plainly named entry that an 'hnfn' name also claims (startup.tjs)
++                        // is a decoy for extractors; the hashed entry is the real file.
++                        ttstr plain = item.Name;
++                        NormalizeInArchiveStorageName(plain);
++                        decoy = hashed_name_set.count(plain.AsStdString()) != 0;
++                    }
++                }
+ 
+                 // push information
+-                ItemVector.push_back(item);
++                if (!decoy)
++                    ItemVector.push_back(item);
+ 
+                 // to next file
+                 ch_file_start += ch_file_size;
+                 ch_file_size = index_size - ch_file_start;
+-                Count++;
++                if (!decoy)
++                    Count++;
+             }
+ 
+             if (!(index_flag & TVP_XP3_INDEX_CONTINUE))
+diff --git a/plugins/TVPPlugin.cpp b/plugins/TVPPlugin.cpp
+index d955b44..555291f 100644
+--- a/plugins/TVPPlugin.cpp
++++ b/plugins/TVPPlugin.cpp
+@@ -39,6 +39,8 @@ static bool TVPPluginLoading = false;
+ void TVPLoadPlugin(const ttstr& name)
+ {
+     bool success = TVPLoadInternalPlugin(name);
++    TVPAddLog(ttstr(success ? TJS_N("(info) Plugin linked (built in): ") : TJS_N("(warn) Plugin not built in: ")) +
++              TVPExtractStorageName(name));
+     return; // seal all plugins
+ }
+ //---------------------------------------------------------------------------

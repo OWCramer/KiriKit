@@ -1,0 +1,10 @@
+_shiorikrkr_start
+_shiorikrkr_tick
+_shiorikrkr_take_view
+_shiorikrkr_canvas_size
+_shiorikrkr_pointer
+_shiorikrkr_wheel
+_shiorikrkr_key
+_shiorikrkr_eval
+_shiorikrkr_capture
+_shiorikrkr_stop
