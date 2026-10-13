@@ -776,6 +776,57 @@ index bc52222..11da6f6 100644
  }
  
  //---------------------------------------------------------------------------
+diff --git a/cpp/core/utils/StringUtil.h b/cpp/core/utils/StringUtil.h
+index d6bb026..3023a74 100644
+--- a/cpp/core/utils/StringUtil.h
++++ b/cpp/core/utils/StringUtil.h
+@@ -31,6 +31,27 @@ inline bool icomp(const std::wstring &x, const std::wstring &y) {
+         std::equal(x.begin(), x.end(), y.begin(), equal_wchar_ignorecase());
+ }
+ 
++#ifdef SHIORIKRKR
++// Shiori: the first and last characters NOT in r (krkr2's versions returned ones that are, and
++// the last looked at the terminator), so Trim keeps "源ノ角ゴシック JP Bold" whole instead of
++// cutting it down to " JP " - which left every font named with a space unfound.
++static int ttstr_find_first_not_of(const ttstr &str, const ttstr &r) {
++    const tjs_char *const begin = str.c_str();
++    const tjs_char *const pend = begin + str.length();
++    for(const tjs_char *p = begin; p < pend; ++p)
++        if(r.IndexOf(*p) == -1)
++            return int(p - begin);
++    return -1;
++}
++
++static int ttstr_find_last_not_of(const ttstr &str, const ttstr &r) {
++    const tjs_char *const begin = str.c_str();
++    for(int i = int(str.length()) - 1; i >= 0; --i)
++        if(r.IndexOf(begin[i]) == -1)
++            return i;
++    return -1;
++}
++#else
+ static int ttstr_find_first_not_of(const ttstr &str, const ttstr &r) {
+     const tjs_char *const pend = str.c_str() + str.length();
+     for(const tjs_char *p = str.c_str(); p < pend; ++p) {
+@@ -51,6 +72,7 @@ static int ttstr_find_last_not_of(const ttstr &str, const ttstr &r) {
+     }
+     return -1;
+ }
++#endif
+ 
+ inline std::string Trim(const std::string &val) {
+     static const char *TRIM_STR =
+@@ -78,6 +100,10 @@ inline ttstr Trim(const ttstr &val) {
+               "\x15\x16\x17\x18\x19\x1A\x1B\x1C\x1D\x1E\x1F");
+     int pos = ttstr_find_first_not_of(val, TRIM_STR);
+     int lastpos = ttstr_find_last_not_of(val, TRIM_STR);
++#ifdef SHIORIKRKR
++    if(pos < 0)
++        return ttstr(); // nothing but spaces
++#endif
+     if(pos == lastpos) {
+         if(pos == std::wstring::npos) {
+             return val;
 diff --git a/cpp/core/utils/win32/ThreadImpl.cpp b/cpp/core/utils/win32/ThreadImpl.cpp
 index afc1493..82c3759 100644
 --- a/cpp/core/utils/win32/ThreadImpl.cpp
@@ -941,6 +992,46 @@ index 514308b..dd64939 100644
      } while(false);
      if(TVPFontNames.GetCount() > 0) {
          // set default fontface name
+diff --git a/cpp/core/visual/FontSystem.cpp b/cpp/core/visual/FontSystem.cpp
+index bc444ae..c9b30fe 100644
+--- a/cpp/core/visual/FontSystem.cpp
++++ b/cpp/core/visual/FontSystem.cpp
+@@ -33,6 +33,20 @@ bool FontSystem::FontExists(const ttstr &name) {
+     InitFontNames();
+ 
+     int *t = TVPFontNames.Find(name);
++#ifdef SHIORIKRKR
++    // Shiori: fonts a game adds after the list was first taken (System.addFont / Ninja Girl's
++    // and NEKOPARA's own fonts from their archives) count too: look again before giving up.
++    if(!t) {
++        std::vector<ttstr> list;
++        TVPGetAllFontList(list);
++        if(list.size() != size_t(TVPFontNames.GetCount())) {
++            for(const ttstr &font : list)
++                if(!TVPFontNames.Find(font))
++                    AddFont(font);
++            t = TVPFontNames.Find(name);
++        }
++    }
++#endif
+     return t != nullptr;
+ }
+ 
+diff --git a/cpp/core/visual/FreeTypeFontRasterizer.cpp b/cpp/core/visual/FreeTypeFontRasterizer.cpp
+index a096963..65bf0f1 100644
+--- a/cpp/core/visual/FreeTypeFontRasterizer.cpp
++++ b/cpp/core/visual/FreeTypeFontRasterizer.cpp
+@@ -90,6 +90,10 @@ void FreeTypeFontRasterizer::ApplyFont(class tTVPNativeBaseBitmap *bmp,
+ void FreeTypeFontRasterizer::ApplyFont(const tTVPFont &font) {
+     CurrentFont = font;
+     ttstr stdname = TVPFontSystem->GetBeingFont(font.Face);
++#ifdef SHIORIKRKR
++    if(getenv("SHIORIKRKR_TRACE_FONT"))
++        fprintf(stderr, "font: %s -> %s\n", font.Face.AsStdString().c_str(), stdname.AsStdString().c_str());
++#endif
+     // TVP_FACE_OPTIONS_NO_ANTIALIASING
+     // TVP_FACE_OPTIONS_NO_HINTING
+     // TVP_FACE_OPTIONS_FORCE_AUTO_HINTING
 diff --git a/cpp/core/visual/GraphicsLoaderIntf.cpp b/cpp/core/visual/GraphicsLoaderIntf.cpp
 index 233fdd5..3ec914f 100644
 --- a/cpp/core/visual/GraphicsLoaderIntf.cpp

@@ -77,7 +77,7 @@ struct Device {
     std::atomic<uint64_t> completed{0};
 
     // Statistics for the profile.
-    unsigned syncs = 0, commits = 0, dispatches = 0;
+    unsigned syncs = 0, commits = 0, dispatches = 0, renames = 0;
     double syncSeconds = 0;
 
     bool start() {
@@ -232,16 +232,51 @@ public:
     id<MTLBuffer> Buffer() const { return Storage; }
     size_t Size() const { return Capacity; }
 
-    // Waits for queued GPU work on this image (before the CPU reads or writes it).
+    // Before the CPU reads: waits for queued GPU work that writes this image (work that only
+    // reads it doesn't matter).
     void Idle() {
-        uint64_t use = LastUse.load(std::memory_order_acquire);
-        if (use && use > gpu().completed.load(std::memory_order_acquire)) gpu().wait(use);
+        uint64_t write = LastWrite.load(std::memory_order_acquire);
+        if (write && write > gpu().completed.load(std::memory_order_acquire)) gpu().wait(write);
+    }
+    // Before the CPU writes: when queued GPU work only reads this image, the image moves to a
+    // fresh buffer (a copy) and the queued work keeps the old one, so nothing waits; when the
+    // GPU writes it, or it is very large, waits.
+    void IdleForWrite() {
+        const uint64_t done = gpu().completed.load(std::memory_order_acquire);
+        const uint64_t use = LastUse.load(std::memory_order_acquire);
+        if (!use || use <= done) return;
+        const uint64_t write = LastWrite.load(std::memory_order_acquire);
+        if ((write && write > done) || Capacity > kRenameLimit) {
+            gpu().wait(use);
+            return;
+        }
+        id<MTLBuffer> fresh = [gpu().device newBufferWithLength:Capacity options:MTLResourceStorageModeShared];
+        memcpy(fresh.contents, Bytes, Capacity);
+        Storage = fresh;
+        Bytes = static_cast<uint8_t *>(fresh.contents);
+        LastUse.store(0, std::memory_order_release);
+        LastWrite.store(0, std::memory_order_release);
+        ++gpu().renames;
     }
     bool Busy() const {
         uint64_t use = LastUse.load(std::memory_order_acquire);
         return use && use > gpu().completed.load(std::memory_order_acquire);
     }
-    void MarkUsed(uint64_t serial) { LastUse.store(serial, std::memory_order_release); }
+    // Queued GPU work reads this image.
+    void MarkUsed(uint64_t serial) {
+        if (serial > LastUse.load(std::memory_order_acquire)) LastUse.store(serial, std::memory_order_release);
+    }
+    // Queued GPU work writes this image.
+    void MarkWritten(uint64_t serial) {
+        MarkUsed(serial);
+        LastWrite.store(serial, std::memory_order_release);
+    }
+    // Forgets queued work (the verifier's bookkeeping).
+    void ClearUse() {
+        LastUse.store(0, std::memory_order_release);
+        LastWrite.store(0, std::memory_order_release);
+    }
+    static constexpr size_t kRenameLimit = 16u << 20;
 
     // Bytes without waiting (for the GPU path, which orders itself).
     uint8_t *Raw() const { return Bytes; }
@@ -252,7 +287,7 @@ public:
         return Bytes + size_t(l) * Pitch;
     }
     void *GetScanLineForWrite(tjs_uint l) override {
-        Idle();
+        IdleForWrite();
         Opaque = false;
         return Bytes + size_t(l) * Pitch;
     }
@@ -260,7 +295,7 @@ public:
     tjs_int GetPitch() const override { return Pitch; }
 
     void Update(const void *pixel, TVPTextureFormat::e format, int pitch, const tTVPRect &rc) override {
-        Idle();
+        IdleForWrite();
         // As krkr2's software image does: rows from rc.top, at most the image's height.
         const uint8_t *src = static_cast<const uint8_t *>(pixel);
         uint8_t *dst = Bytes + size_t(rc.top) * Pitch;
@@ -283,7 +318,7 @@ public:
         return reinterpret_cast<const uint32_t *>(Bytes + size_t(y) * Pitch)[x];
     }
     void SetPoint(int x, int y, uint32_t clr) override {
-        Idle();
+        IdleForWrite();
         if (Format == TVPTextureFormat::Gray)
             Bytes[size_t(y) * Pitch + x] = uint8_t(clr);
         else
@@ -297,7 +332,7 @@ public:
     void SetSize(unsigned int w, unsigned int h) override {
         size_t pitch = AlignedPitch(w);
         if (pitch * std::max(h, 1u) > Capacity || pitch != size_t(Pitch)) {
-            Idle();
+            IdleForWrite();
             totalBytes() -= Capacity;
             Allocate(w, h);
         }
@@ -326,7 +361,8 @@ private:
     uint8_t *Bytes = nullptr;
     tjs_int Pitch = 0;
     size_t Capacity = 0;
-    std::atomic<uint64_t> LastUse{0};
+    std::atomic<uint64_t> LastUse{0};   // the last queued GPU work that reads or writes it
+    std::atomic<uint64_t> LastWrite{0}; // the last that writes it
 };
 
 Texture *ours(iTVPTexture2D *t) { return dynamic_cast<Texture *>(t); }
@@ -335,7 +371,7 @@ Texture *ours(iTVPTexture2D *t) { return dynamic_cast<Texture *>(t); }
 // Operations: each of krkr2's software methods, wrapped. Parameters go on to the software
 // method (which the CPU path runs) and are kept here for the kernel.
 
-enum class Shape { None, Blt, BltAndOpa, BltWithOpa, SD, Fill, Univ, Blur };
+enum class Shape { None, Blt, BltAndOpa, BltWithOpa, SD, Fill, Univ, Blur, ColorMap };
 
 struct Kind {
     Shape shape;
@@ -388,6 +424,8 @@ Kind kindOf(const std::string &name) {
         {"PsDiffBlend", {Shape::BltAndOpa, OpPs + PsDiff, OpPsOpa + PsDiff}},
         {"PsDiff5Blend", {Shape::BltAndOpa, OpPs + PsDiff5, OpPsOpa + PsDiff5}},
         {"PsExclusionBlend", {Shape::BltAndOpa, OpPs + PsExclusion, OpPsOpa + PsExclusion}},
+        {"ApplyColorMap", {Shape::ColorMap, OpColorMap, OpColorMapO}},
+        {"ApplyColorMap_d", {Shape::ColorMap, OpColorMapD, OpColorMapDO}},
         {"BoxBlur", {Shape::Blur, OpBoxBlurRows, 0}},
         {"BoxBlurAlpha", {Shape::Blur, OpBoxBlurRows, 0}},
     };
@@ -654,7 +692,10 @@ private:
     }
 
     static bool Profiling() {
-        static const bool on = getenv("SHIORIKRKR_PROFILE") != nullptr || verifying();
+        static const bool on = [] {
+            const char *e = getenv("SHIORIKRKR_PROFILE");
+            return !(e && std::string(e) == "0");
+        }() || verifying();
         return on;
     }
 
@@ -731,6 +772,34 @@ private:
         return true;
     }
     id<MTLBuffer> BlurTemp = nil;
+
+    // Text: a colour through a glyph's 8-bit coverage map into the target (the map, then the
+    // target itself as the second image).
+    bool TryColorMap(Method *m, Texture *tar, const tTVPRect &rctar, const tRenderTexRectArray &textures) {
+        const size_t n = textures.size();
+        if (n == 2 && (ours(textures[1].first) != tar || !(textures[1].second == rctar))) return false;
+        if (n != 1 && n != 2) return false;
+        Texture *map = ours(textures[0].first);
+        const tTVPRect &rm = textures[0].second;
+        if (!map || map->BytesPerPixel() != 1 || tar->BytesPerPixel() != 4 || !SameSize(rm, rctar) || !Inside(rm, map))
+            return false;
+        const int w = rctar.get_width(), h = rctar.get_height();
+        if (w <= 0 || h <= 0) return true;
+        // Small work on an idle target is quicker on the CPU.
+        if (!tar->Busy() && int64_t(w) * h < 4096) return false;
+        KernelParams p = {};
+        p.width = unsigned(w);
+        p.height = unsigned(h);
+        p.tarPitch = unsigned(tar->GetPitch() / 4);
+        p.tarOffset = unsigned(rctar.top) * p.tarPitch + unsigned(rctar.left);
+        p.rulePitch = unsigned(map->GetPitch());
+        p.ruleOffset = unsigned(rm.top) * p.rulePitch + unsigned(rm.left);
+        p.opa = unsigned(m->Opa);
+        p.color = m->Color;
+        p.op = m->Opa == 255 ? m->K.op : m->K.opOpa;
+        Dispatch(p, tar, nullptr, nullptr, map, nullptr);
+        return true;
+    }
 
     // A stretched blend (krkr2's software path: clip to the target, move the source edges in
     // proportion, resize, blend), on the GPU where the stretch type allows.
@@ -869,7 +938,7 @@ private:
 
     template <typename Array>
     static void IdleAll(iTVPTexture2D *tar, iTVPTexture2D *reftar, const Array &textures) {
-        if (Texture *t = ours(tar)) t->Idle();
+        if (Texture *t = ours(tar)) t->IdleForWrite(); // the CPU writes the target
         if (Texture *t = ours(reftar)) t->Idle();
         for (size_t i = 0; i < textures.size(); ++i)
             if (Texture *t = ours(textures[i].first)) t->Idle();
@@ -907,6 +976,8 @@ private:
         switch (k.shape) {
         case Shape::Blur:
             return TryBlur(m, tar, rctar, textures);
+        case Shape::ColorMap:
+            return TryColorMap(m, tar, rctar, textures);
         case Shape::Fill:
             if (n != 0) return false;
             break;
@@ -1025,10 +1096,10 @@ private:
         [e setBuffer:temp ? temp : t offset:0 atIndex:9];
         [e setBuffer:g.psTables offset:0 atIndex:10];
         [e dispatchThreads:MTLSizeMake(p.width, p.height, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
-        tar->MarkUsed(serial);
         if (src) src->MarkUsed(serial);
         if (dst) dst->MarkUsed(serial);
         if (rule) rule->MarkUsed(serial);
+        tar->MarkWritten(serial);
         // Keep a long frame's work moving.
         if (g.openDispatches >= 256) g.commit();
     }
@@ -1109,10 +1180,10 @@ private:
         };
         save(before);
         // Force the GPU path regardless of size.
-        tar->MarkUsed(gpu().nextSerial); // looks busy, so TryGPU doesn't hand small work back
+        tar->MarkWritten(gpu().nextSerial); // looks busy, so TryGPU doesn't hand small work back
         bool onGPU = TryGPU(m, tarTex, rctar, textures);
         if (!onGPU) {
-            tar->MarkUsed(0);
+            tar->ClearUse();
             OnCPU(m, tarTex, reftar, rctar, textures);
             return false;
         }
@@ -1169,8 +1240,8 @@ std::string profileReport(double ticks) {
     std::string out;
     char line[256];
     Device &g = gpu();
-    snprintf(line, sizeof line, "metal: %.2f syncs/tick (%.2f ms), %.1f dispatches, %.2f commits;", g.syncs / ticks,
-             g.syncSeconds * 1000 / ticks, g.dispatches / ticks, g.commits / ticks);
+    snprintf(line, sizeof line, "metal: %.2f syncs/tick (%.2f ms), %.2f renames, %.1f dispatches, %.2f commits;", g.syncs / ticks,
+             g.syncSeconds * 1000 / ticks, g.renames / ticks, g.dispatches / ticks, g.commits / ticks);
     out += line;
     int shown = 0;
     for (auto &[name, s] : rows) {
@@ -1185,7 +1256,7 @@ std::string profileReport(double ticks) {
             out += line;
         }
     instance->Stats.clear();
-    g.syncs = g.commits = g.dispatches = 0;
+    g.syncs = g.commits = g.dispatches = g.renames = 0;
     g.syncSeconds = 0;
     return out;
 }
@@ -1198,7 +1269,7 @@ bool encodeInto(iTVPTexture2D *texture, const std::function<bool(void *, size_t,
     uint64_t serial = 0;
     id<MTLCommandBuffer> commands = g.bareCommandBuffer(serial);
     const bool encoded = encode((__bridge void *)t->Buffer(), size_t(t->GetPitch()), (__bridge void *)commands);
-    t->MarkUsed(serial);
+    t->MarkWritten(serial);
     return encoded;
 }
 

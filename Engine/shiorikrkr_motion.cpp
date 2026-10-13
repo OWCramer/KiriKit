@@ -520,30 +520,33 @@ public:
         });
     }
 
+    // Transition times (coord, rotation, scale, colour, variables, timeline blends and fades)
+    // are in frames of 1/60 s, as the games pass them (AffineSourceMotion.tjs converts its
+    // milliseconds with `time * 60 / 1000` before calling); only progress() takes milliseconds.
     static tjs_error setCoord(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
-        const double v[4] = {number(p, n, 0), number(p, n, 1), number(p, n, 2) * 60 / 1000, number(p, n, 3)};
+        const double v[4] = {number(p, n, 0), number(p, n, 1), number(p, n, 2), number(p, n, 3)};
         self->command("coord", "", v, 4);
         return TJS_S_OK;
     }
     static tjs_error setRotate(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
-        const double v[3] = {number(p, n, 0), number(p, n, 1) * 60 / 1000, number(p, n, 2)};
+        const double v[3] = {number(p, n, 0), number(p, n, 1), number(p, n, 2)};
         self->command("rot", "", v, 3);
         return TJS_S_OK;
     }
     static tjs_error setScale(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
-        const double v[3] = {number(p, n, 0, 1), number(p, n, 1) * 60 / 1000, number(p, n, 2)};
+        const double v[3] = {number(p, n, 0, 1), number(p, n, 1), number(p, n, 2)};
         self->command("scale", "", v, 3);
         return TJS_S_OK;
     }
     static tjs_error setColor(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
         // 0xAARRGGBB here; the host takes 0xRRGGBBAA.
         const tjs_uint32 argb = tjs_uint32(tjs_int64(number(p, n, 0, 0xFFFFFFFF)));
-        const double v[3] = {double((argb << 8) | (argb >> 24)), number(p, n, 1) * 60 / 1000, number(p, n, 2)};
+        const double v[3] = {double((argb << 8) | (argb >> 24)), number(p, n, 1), number(p, n, 2)};
         self->command("color", "", v, 3);
         return TJS_S_OK;
     }
     static tjs_error setVariable(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
-        const double v[3] = {number(p, n, 1), number(p, n, 2) * 60 / 1000, number(p, n, 3)};
+        const double v[3] = {number(p, n, 1), number(p, n, 2), number(p, n, 3)};
         self->command("variable", text(p, n, 0), v, 3);
         return TJS_S_OK;
     }
@@ -598,7 +601,7 @@ public:
     tTJSVariant getMainTimelineLabelList() { return stringArray(labels("main")); }
     tTJSVariant getDiffTimelineLabelList() { return stringArray(labels("diff")); }
     static tjs_error setTimelineBlendRatio(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
-        const double v[4] = {number(p, n, 1, 1), number(p, n, 2) * 60 / 1000, number(p, n, 3), number(p, n, 4)};
+        const double v[4] = {number(p, n, 1, 1), number(p, n, 2), number(p, n, 3), number(p, n, 4)};
         self->command("blend", text(p, n, 0), v, 4);
         return TJS_S_OK;
     }
@@ -607,12 +610,12 @@ public:
         self->command("play", text(p, n, 0), play, 1);
         const double zero[4] = {0, 0, 0, 0};
         self->command("blend", text(p, n, 0), zero, 4);
-        const double v[4] = {1, number(p, n, 1) * 60 / 1000, number(p, n, 2), 0};
+        const double v[4] = {1, number(p, n, 1), number(p, n, 2), 0};
         self->command("blend", text(p, n, 0), v, 4);
         return TJS_S_OK;
     }
     static tjs_error fadeOutTimeline(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
-        const double v[2] = {number(p, n, 1) * 60 / 1000, number(p, n, 2)};
+        const double v[2] = {number(p, n, 1), number(p, n, 2)};
         self->command("fadeout", text(p, n, 0), v, 2);
         return TJS_S_OK;
     }

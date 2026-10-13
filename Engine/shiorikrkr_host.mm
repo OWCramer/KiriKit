@@ -332,7 +332,13 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
         next.deliver();
         if (next.button) break;
     }
-    static const bool profile = getenv("SHIORIKRKR_PROFILE") != nullptr;
+    // Profiled unless SHIORIKRKR_PROFILE=0: the lines go to the engine's log (the app keeps it
+    // in the game's logs folder), so a device run tells where frames went.
+    static const bool profile = [] {
+        const char *e = getenv("SHIORIKRKR_PROFILE");
+        return !(e && std::string(e) == "0");
+    }();
+    static double lastSlowLine = 0;
     static int profileTicks = 0;
     static double profileTick = 0, profileWorst = 0;
     const auto tickStart = std::chrono::steady_clock::now();
@@ -354,7 +360,9 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
         profileWorst = std::max(profileWorst, took);
         // A tick long enough to drop a frame: what it spent its time on.
         static double lastEmote = 0, lastRender = 0, lastImages = 0, lastModels = 0;
-        if (took > 0.020) {
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (took > 0.020 && now - lastSlowLine >= 1.0) { // at most a line a second
+            lastSlowLine = now;
             char line[240];
             snprintf(line, sizeof line,
                      "ShioriKrkr slow tick: %.1f ms (images loaded %.1f ms, E-mote models loaded %.1f ms, E-mote drawn %.1f ms, "
@@ -367,16 +375,16 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
         lastRender = TVPShioriRenderSeconds;
         lastImages = TVPShioriImageLoadSeconds;
         lastModels = ShioriEmoteLoadSeconds;
-        if (++profileTicks == 300) {
+        if (++profileTicks == 600) {
             char line[256];
             snprintf(line, sizeof line,
-                     "ShioriKrkr profile (300 ticks): tick %.2f ms avg, %.1f ms worst; render ops %.2f ms (%u calls); E-mote %.2f ms",
-                     profileTick * 1000 / 300, profileWorst * 1000, TVPShioriRenderSeconds * 1000 / 300, TVPShioriRenderCalls / 300,
-                     ShioriEmoteDrawSeconds * 1000 / 300);
+                     "ShioriKrkr profile (600 ticks): tick %.2f ms avg, %.1f ms worst; render ops %.2f ms (%u calls); E-mote %.2f ms",
+                     profileTick * 1000 / 600, profileWorst * 1000, TVPShioriRenderSeconds * 1000 / 600, TVPShioriRenderCalls / 600,
+                     ShioriEmoteDrawSeconds * 1000 / 600);
             hostLog(line);
-            const std::string metal = shiori::metal::profileReport(300);
+            const std::string metal = shiori::metal::profileReport(600);
             if (!metal.empty()) hostLog(std::string("ShioriKrkr profile: frame wait ") +
-                                        std::to_string(profileFrameWait * 1000 / 300).substr(0, 5) + " ms; " + metal);
+                                        std::to_string(profileFrameWait * 1000 / 600).substr(0, 5) + " ms; " + metal);
             profileFrameWait = 0;
             profileTicks = 0;
             profileTick = profileWorst = 0;

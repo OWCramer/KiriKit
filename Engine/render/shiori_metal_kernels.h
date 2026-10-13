@@ -26,6 +26,9 @@ enum Op : unsigned {
     OpBoxBlurRows = 70, OpBoxBlurColumns, // a box blur's two passes (sums through the temp buffer)
     // Photoshop-style blends keeping the target's alpha: OpPs + kind, OpPsOpa + kind with opacity.
     OpPs = 80, OpPsOpa = 96,
+    // A colour through an 8-bit coverage map (text): over the target as is, and keeping its
+    // alpha; each with an opacity. The map is read through the rule buffer.
+    OpColorMap = 112, OpColorMapO, OpColorMapD, OpColorMapDO,
 };
 
 // The Photoshop-style kinds, in krkr2's order of their names.
@@ -310,6 +313,28 @@ kernel void shioriLayerOp(device uint *tar [[buffer(0)]],
         return;
     }
     uint ti = p.tarOffset + gid.y * p.tarPitch + gid.x;
+    if (p.op >= 112 && p.op <= 115) {
+        // KiriKiri's ApplyColorMap (and _d): the colour blended in by the map's level.
+        uint s = rule[p.ruleOffset + gid.y * p.rulePitch + gid.x];
+        uint d = tar[ti];
+        uint c1 = p.color & 0xff00ffu, c2 = p.color & 0x00ff00u;
+        if (p.op <= 113) {
+            uint sopa = p.op == 113 ? (s * p.opa) >> 8 : s;
+            uint d1 = d & 0xff00ffu;
+            d1 = ((d1 + ((c1 - d1) * sopa >> 8)) & 0xff00ffu) + (d & 0xff000000u);
+            uint dg = d & 0x00ff00u;
+            tar[ti] = d1 | ((dg + ((c2 - dg) * sopa >> 8)) & 0x00ff00u);
+        } else {
+            uint addr = p.op == 115 ? (((s * p.opa) & 0xff00u) + (d >> 24)) : ((s << 8) + (d >> 24));
+            uint destalpha = uint(negmul[addr]) << 24;
+            uint sopa = ooo[addr];
+            uint d1 = d & 0xff00ffu;
+            d1 = (d1 + ((c1 - d1) * sopa >> 8)) & 0xff00ffu;
+            uint dg = d & 0x00ff00u;
+            tar[ti] = d1 + ((dg + ((c2 - dg) * sopa >> 8)) & 0x00ff00u) + destalpha;
+        }
+        return;
+    }
     uint si = p.srcOffset + gid.y * p.srcPitch + gid.x;
     uint di = p.dstOffset + gid.y * p.dstPitch + gid.x;
     uint opa = p.opa;
