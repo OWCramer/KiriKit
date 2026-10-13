@@ -17,6 +17,9 @@ namespace shiori::metal {
 /// Commits the GPU work queued this tick (without waiting for it).
 void flush();
 
+/// Seconds the CPU has waited for the GPU in all (for slow-tick lines).
+double gpuWaitSeconds();
+
 /// The per-operation profile since the last report, averaged over `ticks`; clears it.
 std::string profileReport(double ticks);
 

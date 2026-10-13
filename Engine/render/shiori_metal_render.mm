@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <execinfo.h>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -79,6 +80,7 @@ struct Device {
     // Statistics for the profile.
     unsigned syncs = 0, commits = 0, dispatches = 0, renames = 0;
     double syncSeconds = 0;
+    double syncSecondsTotal = 0; // never cleared (the host's slow-tick lines)
 
     bool start() {
         device = MTLCreateSystemDefaultDevice();
@@ -187,6 +189,12 @@ struct Device {
         ++commits;
     }
 
+    // What the CPU is doing (SHIORIKRKR_TRACE_SYNC names the operation that waited).
+    static std::string &syncLabel() {
+        thread_local std::string label;
+        return label;
+    }
+
     // Waits for every command buffer up to `serial`.
     void wait(uint64_t serial) {
         auto started = std::chrono::steady_clock::now();
@@ -198,7 +206,29 @@ struct Device {
         uint64_t all = open ? openSerial - 1 : nextSerial - 1;
         while (seen < all && !completed.compare_exchange_weak(seen, all)) {}
         ++syncs;
-        syncSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        const double waited = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        syncSeconds += waited;
+        syncSecondsTotal += waited;
+        static const bool trace = getenv("SHIORIKRKR_TRACE_SYNC") != nullptr;
+        if (trace && waited > 0.001)
+        {
+            fprintf(stderr, "ShioriKrkr GPU wait %.1f ms in %s\n", waited * 1000, syncLabel().empty() ? "(outside a layer op)" : syncLabel().c_str());
+            // Where a wait outside a layer operation came from (hit tests aside): a few frames.
+            static int traced = 0;
+            if (syncLabel().empty() && traced < 40) {
+                void *frames[12];
+                const int n = backtrace(frames, 12);
+                char **names = backtrace_symbols(frames, n);
+                bool hitTest = false;
+                for (int i = 0; i < n && names; ++i)
+                    if (strstr(names[i], "HitTest")) hitTest = true;
+                if (!hitTest && names) {
+                    ++traced;
+                    for (int i = 1; i < n; ++i) fprintf(stderr, "    %s\n", names[i]);
+                }
+                free(names);
+            }
+        }
     }
 };
 
@@ -564,7 +594,11 @@ public:
         unsigned w = std::min(neww, tex->GetWidth()), h = std::min(newh, tex->GetHeight());
         if (w && h) {
             Texture *from = ours(tex);
-            if (from && from->Busy() && t->BytesPerPixel() == 4) {
+            // A large copy (a layer taking its own copy of a shared picture, as a 3360x2240
+            // background does when a transition draws into it) goes to the GPU too, so the
+            // frame thread doesn't spend milliseconds in memcpy.
+            const bool large = size_t(w) * h * 4 >= (size_t(1) << 20);
+            if (from && (from->Busy() || large) && t->BytesPerPixel() == 4 && from->BytesPerPixel() == 4) {
                 // Copy on the GPU behind the work already queued on the source.
                 KernelParams p = {};
                 p.op = OpCopy;
@@ -617,6 +651,16 @@ public:
                      const tRenderTexRectArray &textures) override {
         auto started = std::chrono::steady_clock::now();
         ++DrawCount;
+        static const bool traceSync = getenv("SHIORIKRKR_TRACE_SYNC") != nullptr;
+        if (traceSync) {
+            char label[160];
+            snprintf(label, sizeof label, "%s %dx%d into %ux%u", method->GetName().c_str(), rctar.get_width(), rctar.get_height(),
+                     tar ? tar->GetWidth() : 0, tar ? tar->GetHeight() : 0);
+            Device::syncLabel() = label;
+        }
+        struct ClearLabel {
+            ~ClearLabel() { if (traceSync) Device::syncLabel().clear(); }
+        } clearLabel;
         auto *m = dynamic_cast<Method *>(method);
         bool onGPU = false;
         if (m) {
@@ -648,6 +692,11 @@ public:
             Count(method, "(triangles, verified)", started);
             return;
         }
+        static const bool traceSync = getenv("SHIORIKRKR_TRACE_SYNC") != nullptr;
+        if (traceSync) Device::syncLabel() = method->GetName() + " (triangles)";
+        struct ClearLabel {
+            ~ClearLabel() { if (traceSync) Device::syncLabel().clear(); }
+        } clearLabel;
         bool onGPU = m && TryWarp(m, nTriangles, target, rcclip, pttar, textures);
         if (!onGPU && getenv("SHIORIKRKR_TRACE_WARP")) {
             static int traced = 0;
@@ -922,9 +971,15 @@ private:
                 if (y < r.top) r.top = y;
                 if (++y > r.bottom) r.bottom = y;
             }
+            // The rectangle the corners touch, inside the image: a stretch whose last column ends
+            // on the image's edge reaches a pixel past it (x + 1 rounds up), which krkr2's software
+            // path reads beyond the row; the GPU samples up to the edge instead, so the draw stays
+            // on the GPU and doesn't wait for it (Ninja Girl's 9-pixel strips did, every frame).
+            r.left = std::max<tjs_int>(r.left, 0);
+            r.top = std::max<tjs_int>(r.top, 0);
+            r.right = std::min<tjs_int>(r.right, tjs_int(src->GetWidth()));
+            r.bottom = std::min<tjs_int>(r.bottom, tjs_int(src->GetHeight()));
             for (auto &pt : ps) pt.x -= r.left, pt.y -= r.top;
-            if (r.get_width() > tjs_int(src->GetWidth())) r.set_width(src->GetWidth());
-            if (r.get_height() > tjs_int(src->GetHeight())) r.set_height(src->GetHeight());
             view = r;
         }
         if (!Inside(view, src)) { if (getenv("SHIORIKRKR_TRACE_WARP")) fprintf(stderr, "warp: view %d,%d,%d,%d outside %u x %u\n", view.left, view.top, view.right, view.bottom, src->GetWidth(), src->GetHeight()); return false; }
@@ -1239,6 +1294,8 @@ struct Registration {
 void flush() {
     if (gpu().device) gpu().commit();
 }
+
+double gpuWaitSeconds() { return instance ? gpu().syncSecondsTotal : 0; }
 
 std::string profileReport(double ticks) {
     if (!instance) return {};
