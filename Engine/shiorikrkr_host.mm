@@ -39,6 +39,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -53,6 +54,11 @@ extern bool TVPTerminated;
 void TVPShioriPrepareRestart();
 static unsigned sessionCount = 0;
 unsigned shiorikrkr::sessionGeneration() { return sessionCount; }
+
+// The options a game's executable carries (System.getArgument): Shiori's games are Steam
+// editions, which run with -steam=yes (NEKOPARA then loads steam.tjs and asks krkrsteam.dll for
+// the language, rather than starting in Japanese).
+std::vector<std::string> TVPShioriEmbeddedOptions() { return {"steam=yes"}; }
 void TVPClearScnearioCache();            // krkr2's KAGParser (sic)
 void TVPShioriKAGExClearScenarioCache(); // KAGParserEx's, under Shiori's name
 static double profileFrameWait = 0; // seconds frame() waited for the GPU since the last profile line
@@ -170,6 +176,37 @@ int evaluate(const std::string &expression, std::string &text) {
         return 2;
     }
     try {
+        // Development aid: "#strings:<storage>" lists the identifiers in a compiled (TJS2
+        // bytecode) script's string table, to see which members a script uses.
+        // "#seq:<storage>" lists them in the order they're stored.
+        const bool sequence = expression.rfind("#seq:", 0) == 0;
+        if (sequence || expression.rfind("#strings:", 0) == 0) {
+            std::unique_ptr<tTJSBinaryStream> stream(
+                TVPCreateBinaryStreamForRead(ttstr(expression.substr(sequence ? 5 : 9).c_str()), TJS_W("")));
+            std::vector<uint8_t> bytes(size_t(stream->GetSize()));
+            if (!bytes.empty()) stream->ReadBuffer(bytes.data(), tjs_uint(bytes.size()));
+            std::set<std::string> found;
+            std::vector<std::string> ordered;
+            std::u16string run;
+            auto flush = [&] {
+                if (run.size() >= 2) {
+                    const std::string s = ttstr(reinterpret_cast<const tjs_char *>(run.c_str())).AsStdString();
+                    if (found.insert(s).second || sequence) ordered.push_back(s);
+                }
+                run.clear();
+            };
+            for (int phase = 0; phase < (sequence ? 1 : 2); ++phase) {
+                for (size_t i = size_t(phase); i + 1 < bytes.size(); i += 2) {
+                    const char16_t c = char16_t(bytes[i] | bytes[i + 1] << 8);
+                    if ((c >= 0x20 && c < 0x7f) || (c >= 0x3000 && c < 0xa000)) run += c;
+                    else flush();
+                }
+                flush();
+            }
+            if (!sequence) std::sort(ordered.begin(), ordered.end());
+            for (const auto &s : ordered) text += s + (sequence ? " | " : " ");
+            return 0;
+        }
         tTJSVariant result;
         TVPExecuteExpression(ttstr(expression.c_str()), &result);
         text = result.Type() == tvtVoid ? std::string() : ttstr(result).AsStdString();

@@ -41,7 +41,6 @@ NCB_POST_REGIST_CALLBACK(linkKAGParserEx);
 SHIORI_EMPTY_PLUGIN(wuvorbis, "wuvorbis.dll")
 SHIORI_EMPTY_PLUGIN(wuopus, "wuopus.dll")
 SHIORI_EMPTY_PLUGIN(krmovie, "krmovie.dll")
-SHIORI_EMPTY_PLUGIN(krkrsteam, "krkrsteam.dll")
 SHIORI_EMPTY_PLUGIN(SteamDrawDevice, "SteamDrawDevice.dll")
 SHIORI_EMPTY_PLUGIN(drawdeviceD3DZ, "drawdeviceD3DZ.dll")
 SHIORI_EMPTY_PLUGIN(win32ole, "win32ole.dll")

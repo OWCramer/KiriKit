@@ -3,9 +3,11 @@
  * https://mozilla.org/MPL/2.0/. */
 
 // getLangName.dll, which games call to pick their UI language from the system's (NEKOPARA,
-// Ninja Girl, Letters From a Rainy Day: System.getCurrentUILangName()). On Windows it returns
-// the user's UI language as a locale name such as "en-US" or "ja-JP". the user's own plug-in
-// (AetherKrkr patch 0021, Shiori-written), re-homed for ShioriKrkr.
+// Ninja Girl, Letters From a Rainy Day: System.getCurrentUILangName()). It answers the user's UI
+// language by its English name ("English", "Japanese", "Chinese (Simplified)"): the games lower
+// the case and look for "japanese", "chinese" and "english" in it (NEKOPARA Vol. 0's
+// getSystemLanguageId, Extra's language alias map), so a locale name such as "ja-JP" counted as
+// English. the user's own plug-in (AetherKrkr patch 0021, Shiori-written), re-homed for ShioriKrkr.
 #include "ncbind/ncbind.hpp"
 
 #include <cstdlib>
@@ -28,12 +30,18 @@ std::string currentUILanguage() {
         }
         CFRelease(languages);
     }
-    // "en-US", or "zh-Hans-CN": keep the language and the region, as Windows names them.
-    if (const auto dash = result.find('-'); dash != std::string::npos) {
-        const auto last = result.rfind('-');
-        if (last != dash) result = result.substr(0, dash) + result.substr(last);
-    }
-    return result.empty() ? "en-US" : result;
+    auto starts = [&](const char *prefix) { return result.rfind(prefix, 0) == 0; };
+    if (starts("ja")) return "Japanese";
+    if (starts("zh-Hant") || starts("zh-TW") || starts("zh-HK")) return "Chinese (Traditional)";
+    if (starts("zh")) return "Chinese (Simplified)";
+    if (starts("ko")) return "Korean";
+    if (starts("fr")) return "French";
+    if (starts("de")) return "German";
+    if (starts("es")) return "Spanish";
+    if (starts("it")) return "Italian";
+    if (starts("ru")) return "Russian";
+    if (starts("pt")) return "Portuguese";
+    return "English";
 }
 
 } // namespace
