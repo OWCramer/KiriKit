@@ -41,5 +41,5 @@ if [ -z "${SHIORIKRKR_EMOTE_LIB:-}" ]; then
     (cd "$ROOT/Packages/ShioriKrkrKit" && swift build -c release --product ShioriKrkrEmoteHarness >&2) || exit 1
     export SHIORIKRKR_EMOTE_LIB="$ROOT/Packages/ShioriKrkrKit/.build/release/libShioriKrkrEmoteHarness.dylib"
 fi
-exec "$ROOT/build/shiorikrkr/macos/shiorikrkr-harness" --base "$GAME/base" ${PATCH[@]+"${PATCH[@]}"} --work "$WORK" \
+exec ${SHIORIKRKR_WRAP:-} "$ROOT/build/shiorikrkr/macos/shiorikrkr-harness" --base "$GAME/base" ${PATCH[@]+"${PATCH[@]}"} --work "$WORK" \
     ${SCHEME[@]+"${SCHEME[@]}"} --font "$ROOT/App/Resources/SiglusFonts/BIZUDGothic-Regular.ttf" ${ARGS[@]+"${ARGS[@]}"}

@@ -12,11 +12,11 @@
 // Motion.Player (the plain motion files, .mtn) is answered as an idle player for now: it
 // draws nothing (NEKOPARA's characters are all E-mote).
 #include "tjsCommHead.h"
-#include "ncbind/ncbind.hpp"
+#include <ncbind.hpp>
 #include "tjsArray.h"
 #include "tjsDictionary.h"
-#include "tjsNativeLayer.h"
-#include "TVPDebug.h"
+#include "LayerIntf.h"
+#include "DebugIntf.h"
 
 #include <algorithm>
 #include <cstring>
@@ -27,7 +27,7 @@
 
 #include "shiorikrkr_emote.h"
 
-#define NCB_MODULE_NAME TJS_N("emoteplayer.dll")
+#define NCB_MODULE_NAME TJS_W("emoteplayer.dll")
 
 using namespace shiorikrkr::util;
 
@@ -283,13 +283,8 @@ public:
         const int w = int(layer->GetImageWidth()), h = int(layer->GetImageHeight());
         hostCommand(player(), "show");
         int32_t bounds[4] = {0, 0, 0, 0};
-        if (host()->draw(host()->context, player(), pixels, w, h, pitch, affine_, bounds)) {
-            // The host draws R, G, B, A; layers hold B, G, R, A.
-            for (int y = std::max(0, bounds[1]); y < std::min(h, bounds[3]); ++y) {
-                uint8_t *p = pixels + size_t(y) * pitch;
-                for (int x = std::max(0, bounds[0]); x < std::min(w, bounds[2]); ++x) std::swap(p[x * 4], p[x * 4 + 2]);
-            }
-        }
+        // The host draws R, G, B, A, the order krkr2 keeps layer pixels in.
+        host()->draw(host()->context, player(), pixels, w, h, pitch, affine_, bounds);
         layer->Update();
     }
 

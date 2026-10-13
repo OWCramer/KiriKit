@@ -24,6 +24,7 @@
 #include "cx_decrypt.h"
 #include "nekoworks.h"
 #include "cursor_decode.h"
+#include "shiorikrkr_emote.h"
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/base_sink.h>
@@ -187,6 +188,7 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
     h.messageContext = config->message_context;
     h.finished = false;
     installLoggers();
+    shiorikrkr::setEmoteHost(config->struct_size >= sizeof(shiorikrkr_config_t) ? config->emote : nullptr);
     shiori::resetExit();
 
     std::string root = config->game_root;
@@ -339,7 +341,7 @@ SHIORIKRKR_EXPORT int shiorikrkr_frame(shiorikrkr_frame_t *frame) {
     frame->height = hgt;
     frame->pitch = texture->GetPitch();
     frame->serial = shiori::windowFrameSerial(window);
-    frame->format = SHIORIKRKR_FRAME_BGRA;
+    frame->format = SHIORIKRKR_FRAME_RGBA; // krkr2 keeps pixels as R, G, B, A in memory
     frame->texture = nullptr;
     // A coarse look for anything not black: the host lifts its launch cover on the first such
     // frame (the game's first frames are black while its title loads).
@@ -484,6 +486,7 @@ SHIORIKRKR_EXPORT void shiorikrkr_stop(void) {
         hostLog("ShioriKrkr: shutdown threw");
     }
     shiori::audioShutdown();
+    shiorikrkr::setEmoteHost(nullptr);
     shiori::cursorChanged = nullptr;
     h.cursorFiles.clear();
     h.input.clear();

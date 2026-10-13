@@ -20,12 +20,37 @@
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <execinfo.h>
+#include <csignal>
+#include <exception>
+#include <unistd.h>
 #include <map>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "shiorikrkr.h"
+
+// A backtrace on a crash or an uncaught exception (lldb isn't always at hand).
+static void printBacktrace() {
+    void *frames[64];
+    const int count = backtrace(frames, 64);
+    std::fflush(stdout);
+    backtrace_symbols_fd(frames, count, 2);
+}
+static void crashed(int signal) {
+    std::fprintf(stderr, "== signal %d\n", signal);
+    printBacktrace();
+    _exit(128 + signal);
+}
+static void installCrashHandlers() {
+    std::set_terminate([] {
+        std::fprintf(stderr, "== terminate\n");
+        printBacktrace();
+        abort();
+    });
+    for (int s : {SIGSEGV, SIGBUS, SIGILL, SIGFPE}) signal(s, crashed);
+}
 
 static void logLine(void *, const char *line) {
     std::fprintf(stdout, "%s\n", line);
@@ -83,6 +108,8 @@ static void writePNG(const std::string &path, const shiorikrkr_frame_t &frame) {
 }
 
 int main(int argc, char **argv) {
+    installCrashHandlers();
+    setvbuf(stdout, nullptr, _IOLBF, 0);
     @autoreleasepool {
         std::string base, patch, work, exe = "game.exe", scheme, font;
         int frames = 600;
@@ -226,6 +253,8 @@ int main(int argc, char **argv) {
         shiorikrkr_stop();
         std::printf("== stopped (session %d)\n", session + 1);
         }
-        return 0;
+        // The engine's threads outlive the game; leave without running static destructors.
+        std::fflush(stdout);
+        _exit(0);
     }
 }

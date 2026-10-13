@@ -5,10 +5,10 @@
 // motionplayer.dll: the same Motion classes as emoteplayer.dll (shiorikrkr_motion.cpp), under
 // the name later games link.
 #include "tjsCommHead.h"
-#include "ncbind/ncbind.hpp"
+#include <ncbind.hpp>
 
-#define NCB_MODULE_NAME TJS_N("motionplayer.dll")
+#define NCB_MODULE_NAME TJS_W("motionplayer.dll")
 
-static void ShioriMotionPlayerModule() { ncbAutoRegister::LoadModule(TJS_N("emoteplayer.dll")); }
+static void ShioriMotionPlayerModule() { ncbAutoRegister::LoadModule(TJS_W("emoteplayer.dll")); }
 
 NCB_PRE_REGIST_CALLBACK(ShioriMotionPlayerModule);

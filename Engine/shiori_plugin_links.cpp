@@ -27,3 +27,23 @@ NCB_PRE_UNREGIST_CALLBACK(unlinkExtrans);
 #undef NCB_MODULE_NAME
 #define NCB_MODULE_NAME TJS_W("KAGParserEx.dll")
 NCB_POST_REGIST_CALLBACK(linkKAGParserEx);
+
+// DLLs games link whose work is done elsewhere (audio decoders and the movie back end are in the
+// core, Steam and Windows integration have no meaning here) or not yet: linking them succeeds and
+// adds nothing.
+#define SHIORI_EMPTY_PLUGIN(tag, dll)                                                                \
+    namespace {                                                                                      \
+    void shioriEmpty_##tag() {}                                                                      \
+    }                                                                                                \
+    static ncbCallbackAutoRegister shioriEmptyRegister_##tag(TJS_W(dll), ncbAutoRegister::PostRegist, \
+                                                             &shioriEmpty_##tag, nullptr);
+SHIORI_EMPTY_PLUGIN(wuvorbis, "wuvorbis.dll")
+SHIORI_EMPTY_PLUGIN(wuopus, "wuopus.dll")
+SHIORI_EMPTY_PLUGIN(krmovie, "krmovie.dll")
+SHIORI_EMPTY_PLUGIN(krkrsteam, "krkrsteam.dll")
+SHIORI_EMPTY_PLUGIN(SteamDrawDevice, "SteamDrawDevice.dll")
+SHIORI_EMPTY_PLUGIN(drawdeviceD3DZ, "drawdeviceD3DZ.dll")
+SHIORI_EMPTY_PLUGIN(win32ole, "win32ole.dll")
+SHIORI_EMPTY_PLUGIN(wsh, "wsh.dll")
+SHIORI_EMPTY_PLUGIN(messenger, "messenger.dll")
+SHIORI_EMPTY_PLUGIN(wumsadp, "wumsadp.dll")
