@@ -61,12 +61,13 @@ typedef struct shiorikrkr_emote_host {
      * (label with label main / diff / playing and the index) come back in out. */
     double (*query)(void *context, void *player, const char *verb, const char *label,
                     const double *numbers, int32_t count, char *out, uint32_t capacity);
-    /* Draws the character into rgba (R, G, B, A bytes, straight alpha, cleared by the host)
-     * of width x height, through transform (a, b, c, d, tx, ty: x' = a x + c y + tx,
-     * y' = b x + d y + ty, from the character's own space centred on the canvas). Returns 1
-     * when it drew anything. */
+    /* Draws the character into rgba (R, G, B, A bytes, straight alpha; the engine has
+     * cleared it) of width x height, through transform (a, b, c, d, tx, ty: x' = a x + c y +
+     * tx, y' = b x + d y + ty, from the character's own space centred on the canvas). The
+     * host writes only inside the rectangle it returns in bounds (left, top, right, bottom,
+     * right and bottom exclusive). Returns 1 when it drew anything. */
     int32_t (*draw)(void *context, void *player, uint8_t *rgba, int32_t width, int32_t height,
-                    int32_t pitch, const double *transform);
+                    int32_t pitch, const double *transform, int32_t *bounds);
 } shiorikrkr_emote_host_t;
 
 typedef struct shiorikrkr_config {

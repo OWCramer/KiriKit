@@ -1,0 +1,67 @@
+diff --git a/core/render/backend/SWRenderBackend.cpp b/core/render/backend/SWRenderBackend.cpp
+index 268e888..04678d7 100644
+--- a/core/render/backend/SWRenderBackend.cpp
++++ b/core/render/backend/SWRenderBackend.cpp
+@@ -456,6 +456,7 @@ void SWRenderBackend::DrawMesh(const float* vertices,
+                               (uint8_t)(uniformColor_[2] * 255), (uint8_t)(uniformColor_[3] * 255)};
+     const float whiteModulation[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+     const float* modulation = colorModulation ? colorModulation : whiteModulation;
++    const bool modulated = modulation[0] != 1.0f || modulation[1] != 1.0f || modulation[2] != 1.0f || modulation[3] != 1.0f;
+ 
+     for (int idx = 0; idx + 2 < indexCount; idx += 3)
+     {
+@@ -540,10 +541,13 @@ void SWRenderBackend::DrawMesh(const float* vertices,
+                     if (!hasStencil || ((maskRow[px] >> 24) & 0xFF) >= 128)
+                     {
+                         ColorRGBA src = texData[(size_t)ty * texW + tx];
+-                        src.r = static_cast<uint8_t>(src.r * modulation[0] + 0.5f);
+-                        src.g = static_cast<uint8_t>(src.g * modulation[1] + 0.5f);
+-                        src.b = static_cast<uint8_t>(src.b * modulation[2] + 0.5f);
+-                        src.a = static_cast<uint8_t>(src.a * modulation[3] + 0.5f);
++                        if (modulated) // Shiori: white modulation leaves the texel as it is
++                        {
++                            src.r = static_cast<uint8_t>(src.r * modulation[0] + 0.5f);
++                            src.g = static_cast<uint8_t>(src.g * modulation[1] + 0.5f);
++                            src.b = static_cast<uint8_t>(src.b * modulation[2] + 0.5f);
++                            src.a = static_cast<uint8_t>(src.a * modulation[3] + 0.5f);
++                        }
+                         row[px] = BlendPixels(src, row[px], blendMode_, opacity, uniformColor);
+                     }
+                 }
+@@ -638,6 +642,36 @@ void SWRenderBackend::LayerDrawRect(void* handle,
+                                ((uint32_t)(layerColor_[1] * 255.0f + 0.5f) << 8) |
+                                ((uint32_t)(layerColor_[0] * 255.0f + 0.5f));
+ 
++    // Shiori: plain alpha at full opacity (E-mote characters, most layers) samples by a column
++    // table, leaves the target alone under transparent pixels and copies opaque ones.
++    if (layerMethod_ == iTVPRenderBackend::LBM_ALPHA && layerOpa8_ == 255)
++    {
++        std::vector<int> columns((size_t)(x1 - x0));
++        for (int px = x0; px < x1; px++)
++        {
++            float tx = ((float)px - x + 0.5f) / w;
++            int sx = (int)((u0 + (u1 - u0) * tx) * texW_1 + 0.5f);
++            columns[(size_t)(px - x0)] = sx < 0 ? 0 : (sx > texW_1 ? texW_1 : sx);
++        }
++        for (int py = y0; py < y1; py++)
++        {
++            float ty = ((float)py - y + 0.5f) / h;
++            int sy = (int)((v0 + (v1 - v0) * ty) * texH_1 + 0.5f);
++            sy = sy < 0 ? 0 : (sy > texH_1 ? texH_1 : sy);
++            uint32_t* row = dst + (size_t)py * width;
++            const uint32_t* texRow = texData + (size_t)sy * texW;
++            for (int px = x0; px < x1; px++)
++            {
++                const uint32_t s = texRow[columns[(size_t)(px - x0)]];
++                const uint32_t sa = s >> 24;
++                if (sa == 0)
++                    continue;
++                row[px] = sa == 255 ? s : LayerBlendPixel(iTVPRenderBackend::LBM_ALPHA, s, row[px], 255, fillColor);
++            }
++        }
++        return;
++    }
++
+     for (int py = y0; py < y1; py++)
+     {
+         float ty = ((float)py - y + 0.5f) / h;

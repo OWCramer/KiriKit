@@ -137,8 +137,20 @@ int main(int argc, char **argv) {
 
         char buffer[4096];
         int frame = 0;
+        double tickSeconds = 0, slowest = 0;
         for (; frame < frames; ++frame) {
-            if (!shiorikrkr_tick()) {
+            const auto tickStart = std::chrono::steady_clock::now();
+            const int running = shiorikrkr_tick();
+            const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - tickStart).count();
+            tickSeconds += took;
+            slowest = std::max(slowest, took);
+            if (frame % 300 == 299) {
+                std::printf("== frames %d-%d: tick %.1f ms average, %.1f ms slowest\n", frame - 299, frame,
+                            tickSeconds / 300 * 1000, slowest * 1000);
+                tickSeconds = 0;
+                slowest = 0;
+            }
+            if (!running) {
                 std::printf("== game quit at frame %d\n", frame);
                 break;
             }

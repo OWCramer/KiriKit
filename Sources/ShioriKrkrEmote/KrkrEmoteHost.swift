@@ -19,6 +19,8 @@ public final class KrkrEmoteHost {
     private let gpu: EmoteGPU?
     private let queue: MTLCommandQueue?
     private var target: MTLTexture?
+    private var finished: MTLTexture?
+    private let finisher: EmoteFinisher?
     /// The title's PSB seed, once a model has given it (every model of a game shares it).
     private var seed: UInt32?
     /// Recently read models by file (a character is loaded again for each new layer).
@@ -30,6 +32,7 @@ public final class KrkrEmoteHost {
     init() {
         gpu = EmoteGPU(pixelFormat: .rgba8Unorm)
         queue = gpu?.device.makeCommandQueue()
+        finisher = gpu.flatMap { EmoteFinisher(device: $0.device) }
     }
 
     /// The C table to put in `shiorikrkr_config_t.emote`. It points at `shared`.
@@ -86,12 +89,14 @@ public final class KrkrEmoteHost {
             }
             return value
         }
-        t.draw = { context, player, rgba, width, height, pitch, transform in
-            guard let context, let player, let rgba, let transform else { return 0 }
+        t.draw = { context, player, rgba, width, height, pitch, transform, bounds in
+            guard let context, let player, let rgba, let transform, let bounds else { return 0 }
             let host = Unmanaged<KrkrEmoteHost>.fromOpaque(context).takeUnretainedValue()
             let p = Unmanaged<KrkrEmotePlayer>.fromOpaque(player).takeUnretainedValue()
             let m = (0..<6).map { transform[$0] }
-            return host.draw(p, into: rgba, width: Int(width), height: Int(height), pitch: Int(pitch), transform: m) ? 1 : 0
+            guard let r = host.draw(p, into: rgba, width: Int(width), height: Int(height), pitch: Int(pitch), transform: m) else { return 0 }
+            bounds[0] = Int32(r.0); bounds[1] = Int32(r.1); bounds[2] = Int32(r.2); bounds[3] = Int32(r.3)
+            return 1
         }
         return t
     }
@@ -174,18 +179,25 @@ public final class KrkrEmoteHost {
 
     // MARK: Drawing
 
+    /// Draws `p` and copies the covered part into `rgba` (straight alpha); returns that
+    /// part's rectangle, or nil when nothing was drawn.
     func draw(_ p: KrkrEmotePlayer, into rgba: UnsafeMutablePointer<UInt8>, width: Int, height: Int, pitch: Int,
-              transform: [Double]) -> Bool {
-        guard p.shown, let gpu, let queue, width > 0, height > 0 else { return false }
+              transform: [Double]) -> (Int, Int, Int, Int)? {
+        guard p.shown, let gpu, let queue, let finisher, width > 0, height > 0 else { return nil }
         let tint = p.tint
-        guard tint.a > 0 else { return false }
+        guard tint.a > 0 else { return nil }
         if target == nil || target!.width != width || target!.height != height {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
             d.usage = [.renderTarget, .shaderRead]
-            d.storageMode = .shared
+            d.storageMode = .private
             target = gpu.device.makeTexture(descriptor: d)
+            let o = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+            o.usage = [.shaderWrite]
+            o.storageMode = .shared
+            finished = gpu.device.makeTexture(descriptor: o)
         }
-        guard let target, let buffer = queue.makeCommandBuffer() else { return false }
+        guard let target, let finished, let buffer = queue.makeCommandBuffer() else { return nil }
+        let started = Self.trace ? Date() : nil
         let pose = p.pose()
         let place = p.placement(transform)
         var prepared: [EmoteGPU.Prepared] = []
@@ -195,46 +207,31 @@ public final class KrkrEmoteHost {
             let list = renderer.drawList(variables: variables, transform: place)
             if let ready = gpu.prepare(list, model: p.models[i], buffer: buffer) { prepared.append(ready) }
         }
-        if Self.trace {
-            traceCount += 1
-            if traceCount % 120 == 1 {
-                let v = pose.filter { $0.value != 0 }.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
-                FileHandle.standardError.write(("emote host: place \(place) tint \(tint) coord \(p.coordX.current(p.clock)),\(p.coordY.current(p.clock)) scale \(p.scale.current(p.clock)) items \(prepared.map { $0.itemCount }) timelines \(p.playingLabels) \(v)\n").data(using: .utf8)!)
-            }
-        }
+        let evaluated = Self.trace ? Date() : nil
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         pass.colorAttachments[0].storeAction = .store
-        guard let encoder = buffer.makeRenderCommandEncoder(descriptor: pass) else { return false }
+        guard let encoder = buffer.makeRenderCommandEncoder(descriptor: pass) else { return nil }
         for ready in prepared { gpu.draw(ready, encoder: encoder, width: width, height: height) }
         encoder.endEncoding()
+        finisher.encode(buffer, drawn: target, out: finished,
+                        tint: SIMD4(Float(tint.r), Float(tint.g), Float(tint.b), Float(tint.a)))
         buffer.commit()
         buffer.waitUntilCompleted()
-        target.getBytes(rgba, bytesPerRow: pitch, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
-        // Premultiplied → straight alpha (the engine's layers), with the game's colour.
-        let r = tint.r, g = tint.g, b = tint.b, a = tint.a
-        let plain = r == 1 && g == 1 && b == 1 && a == 1
-        for y in 0..<height {
-            let row = UnsafeMutableRawPointer(rgba + y * pitch).assumingMemoryBound(to: UInt32.self)
-            for x in 0..<width where row[x] != 0 {
-                let px = UnsafeMutableRawPointer(row + x).assumingMemoryBound(to: UInt8.self)
-                let alpha = Int(px[3])
-                guard alpha > 0 else { row[x] = 0; continue }
-                if alpha < 255 {
-                    px[0] = UInt8(min(255, Int(px[0]) * 255 / alpha))
-                    px[1] = UInt8(min(255, Int(px[1]) * 255 / alpha))
-                    px[2] = UInt8(min(255, Int(px[2]) * 255 / alpha))
-                }
-                if !plain {
-                    px[0] = UInt8(Double(px[0]) * r)
-                    px[1] = UInt8(Double(px[1]) * g)
-                    px[2] = UInt8(Double(px[2]) * b)
-                    px[3] = UInt8(Double(px[3]) * a)
-                }
+        let rendered = Self.trace ? Date() : nil
+        guard let r = finisher.covered else { return nil }
+        finished.getBytes(rgba + r.1 * pitch + r.0 * 4, bytesPerRow: pitch,
+                          from: MTLRegionMake2D(r.0, r.1, r.2 - r.0, r.3 - r.1), mipmapLevel: 0)
+        if Self.trace, let started, let evaluated, let rendered {
+            traceCount += 1
+            if traceCount % 120 == 1 {
+                let v = pose.filter { $0.value != 0 }.sorted { $0.key < $1.key }.map { "\($0.key)=\(String(format: "%.2f", $0.value))" }
+                let ms = { (a: Date, b: Date) in String(format: "%.1f", b.timeIntervalSince(a) * 1000) }
+                FileHandle.standardError.write(("emote host: eval \(ms(started, evaluated)) ms, GPU \(ms(evaluated, rendered)) ms, copy \(ms(rendered, Date())) ms; rect \(r) items \(prepared.map { $0.itemCount }) timelines \(p.playingLabels) \(v)\n").data(using: .utf8)!)
             }
         }
-        return true
+        return r
     }
 }

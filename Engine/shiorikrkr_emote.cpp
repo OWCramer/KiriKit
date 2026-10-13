@@ -18,6 +18,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -342,23 +343,37 @@ private:
         int pitch = 0;
         uint8_t *pixels = backend->LockTarget(layer_->EmoteTarget, pitch);
         if (!pixels) return;
-        std::memset(pixels, 0, size_t(pitch) * height);
+        // Clear what the last frame drew (all of it when that isn't known).
+        int *rect = layer_->EmoteRect;
+        if (rect[0] < 0) {
+            std::memset(pixels, 0, size_t(pitch) * height);
+        } else if (rect[2] > rect[0] && rect[3] > rect[1]) {
+            for (int y = std::max(0, rect[1]); y < std::min(height, rect[3]); ++y)
+                std::memset(pixels + size_t(y) * pitch + size_t(std::max(0, rect[0])) * 4, 0,
+                            size_t(std::min(width, rect[2]) - std::max(0, rect[0])) * 4);
+        }
+        int32_t bounds[4] = {0, 0, 0, 0};
         int32_t drew = 0;
         // The layer's 4x4 (row vectors, as Direct3D): x' = m11 x + m21 y + m41.
         const float *m = layer_->Matrix;
         const double transform[6] = {m[0], m[1], m[4], m[5], m[12] + width * 0.5, m[13] + height * 0.5};
-        if (shown_ && player_) drew = host->draw(host->context, player_, pixels, width, height, pitch, transform);
+        if (shown_ && player_) drew = host->draw(host->context, player_, pixels, width, height, pitch, transform, bounds);
+        if (drew) {
+            rect[0] = std::clamp<int>(bounds[0], 0, width);
+            rect[1] = std::clamp<int>(bounds[1], 0, height);
+            rect[2] = std::clamp<int>(bounds[2], 0, width);
+            rect[3] = std::clamp<int>(bounds[3], 0, height);
+        } else {
+            rect[0] = rect[1] = rect[2] = rect[3] = 0;
+        }
         static const bool trace = getenv("SHIORIKRKR_TRACE_EMOTE") != nullptr;
-        size_t covered = 0;
-        if (trace && (traceCount_ % 120) == 0)
-            for (int y = 0; y < height; ++y)
-                for (int x = 0; x < width; ++x) covered += pixels[size_t(y) * pitch + x * 4 + 3] != 0;
         if (trace && (++traceCount_ % 120) == 1)
-            fprintf(stderr, "emote %p covered=%zu shown=%d drew=%d plane=%d front=%d matrix=%.2f,%.2f,%.2f,%.2f,%.1f,%.1f\n", (void *)this, covered,
-                    shown_, drew, layer_->drawPlane, layer_->frontIndex, transform[0], transform[1], transform[2], transform[3],
-                    transform[4], transform[5]);
+            fprintf(stderr, "emote %p shown=%d drew=%d rect=%d,%d,%d,%d plane=%d front=%d matrix=%.2f,%.2f,%.2f,%.2f,%.1f,%.1f\n",
+                    (void *)this, shown_, drew, rect[0], rect[1], rect[2], rect[3], layer_->drawPlane, layer_->frontIndex,
+                    transform[0], transform[1], transform[2], transform[3], transform[4], transform[5]);
         backend->UnlockTarget(layer_->EmoteTarget);
     }
+
 
     drawdevice::D3DLayer *layer_ = nullptr;
     void *player_ = nullptr;
