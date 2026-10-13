@@ -16,6 +16,8 @@
 #include "tjsArray.h"
 #include "tjsDictionary.h"
 #include "LayerIntf.h"
+#include "StorageIntf.h"
+#include "ScriptMgnIntf.h"
 #include "DebugIntf.h"
 
 #include <algorithm>
@@ -113,7 +115,16 @@ public:
         Resource r;
         std::vector<uint8_t> bytes;
         std::string error;
-        if (!readStorage(path, bytes, error)) TVPThrowExceptionMessage(ttstr(error.c_str()).c_str());
+        // NEKO WORKs ship each character twice: the plain-layer set (emote.xp3) and the
+        // Direct3D set (emotewin.xp3, "dx_" names) the PC game shows by default. Shiori's
+        // renderer draws the Direct3D set; the scripts can't tell the difference.
+        ttstr source = path;
+        {
+            const ttstr name = TVPExtractStorageName(path);
+            const ttstr dx = TVPExtractStoragePath(path) + TJS_W("dx_") + name;
+            if (TVPIsExistentStorage(dx)) source = dx;
+        }
+        if (!readStorage(source, bytes, error)) TVPThrowExceptionMessage(ttstr(error.c_str()).c_str());
         if (host()) {
             const uint8_t *data = bytes.data();
             const uint64_t size = bytes.size();
@@ -181,14 +192,21 @@ NCB_REGISTER_SUBCLASS(ShioriMotionResources) {
     NCB_METHOD(setEmotePSBDecryptFunc);
 }
 
-// Motion.SeparateLayerAdaptor: a player draws into this layer.
+// Motion.SeparateLayerAdaptor: the character drawn on a layer of its own. The game makes its
+// owner a binder layer (no image of its own, ltBinder) and draws through the adaptor, so the
+// character lives in a child layer the adaptor keeps over the owner's whole area.
 class ShioriSeparateLayerAdaptor {
 public:
-    explicit ShioriSeparateLayerAdaptor(iTJSDispatch2 *layer) : layer_(layer) {
-        if (layer_) layer_->AddRef();
+    explicit ShioriSeparateLayerAdaptor(iTJSDispatch2 *owner) : owner_(owner) {
+        if (owner_) owner_->AddRef();
     }
     ~ShioriSeparateLayerAdaptor() {
-        if (layer_) layer_->Release();
+        if (child_) {
+            if (child_->IsValid(0, nullptr, nullptr, child_) == TJS_S_TRUE)
+                child_->Invalidate(0, nullptr, nullptr, child_);
+            child_->Release();
+        }
+        if (owner_) owner_->Release();
     }
     void assign(iTJSDispatch2 *) {}
     void clear() {}
@@ -198,10 +216,41 @@ public:
     void setIsPrimary(bool) {}
     tTJSVariant getParent() { return tTJSVariant(); }
     void setParent(tTJSVariant) {}
-    iTJSDispatch2 *layer() const { return layer_; }
+
+    // The layer to draw into, made (or resized to the owner) as needed.
+    iTJSDispatch2 *layer() {
+        if (!owner_) return nullptr;
+        static tTJSVariant prepare;
+        if (prepare.Type() == tvtVoid) {
+            TVPExecuteExpression(TJS_W("(function(owner, child) {"
+                                       " if (child === void) {"
+                                       "  child = new global.Layer(owner.window, owner);"
+                                       "  child.name = 'E-mote'; child.type = ltAlpha; child.hitThreshold = 256;"
+                                       "  child.visible = true; }"
+                                       " var p = owner.window.primaryLayer;"
+                                       " var w = owner.width > 0 ? owner.width : p.width, h = owner.height > 0 ? owner.height : p.height;"
+                                       " if (child.imageWidth != w || child.imageHeight != h) {"
+                                       "  child.setImageSize(w, h); child.setSizeToImageSize(); }"
+                                       " return child; })"),
+                                 &prepare);
+        }
+        tTJSVariant ownerValue(owner_, owner_), childValue, result;
+        if (child_) childValue = tTJSVariant(child_, child_);
+        tTJSVariant *params[] = {&ownerValue, &childValue};
+        iTJSDispatch2 *fn = prepare.AsObjectNoAddRef();
+        if (!fn || TJS_FAILED(fn->FuncCall(0, nullptr, nullptr, &result, 2, params, nullptr))) return nullptr;
+        iTJSDispatch2 *made = result.AsObjectNoAddRef();
+        if (made && made != child_) {
+            made->AddRef();
+            if (child_) child_->Release();
+            child_ = made;
+        }
+        return child_;
+    }
 
 private:
-    iTJSDispatch2 *layer_ = nullptr;
+    iTJSDispatch2 *owner_ = nullptr;
+    iTJSDispatch2 *child_ = nullptr;
 };
 
 NCB_REGISTER_SUBCLASS(ShioriSeparateLayerAdaptor) {
@@ -231,9 +280,13 @@ class ShioriLayerEmotePlayer {
 public:
     explicit ShioriLayerEmotePlayer(ShioriMotionResources *resources) : resources_(resources) {}
 
-    void play(ttstr motion, tjs_int) {
+    void play(ttstr motion, tjs_int flags) {
         motion_ = utf8(motion);
-        ensure();
+        if (ensure()) {
+            const double f = flags;
+            hostCommand(player(), "play", motion_, &f, 1);
+            if (getenv("SHIORIKRKR_TRACE_EMOTE")) TVPAddLog(ttstr("E-mote play ") + motion);
+        }
     }
     void initPhysics(tTJSVariant) {}
 
@@ -284,7 +337,15 @@ public:
         hostCommand(player(), "show");
         int32_t bounds[4] = {0, 0, 0, 0};
         // The host draws R, G, B, A, the order krkr2 keeps layer pixels in.
-        host()->draw(host()->context, player(), pixels, w, h, pitch, affine_, bounds);
+        const int drew = host()->draw(host()->context, player(), pixels, w, h, pitch, affine_, bounds);
+        static const bool trace = getenv("SHIORIKRKR_TRACE_EMOTE") != nullptr;
+        if (trace) {
+            char line[256];
+            snprintf(line, sizeof line, "E-mote draw %p into %dx%d: drew %d bounds %d,%d,%d,%d affine %.2f %.2f %.2f %.2f %.1f %.1f",
+                     (void *)this, w, h, drew, bounds[0], bounds[1], bounds[2], bounds[3], affine_[0], affine_[1],
+                     affine_[2], affine_[3], affine_[4], affine_[5]);
+            TVPAddLog(ttstr(line));
+        }
         layer->Update();
     }
 

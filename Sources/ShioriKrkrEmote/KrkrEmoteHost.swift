@@ -191,9 +191,15 @@ public final class KrkrEmoteHost {
     /// part's rectangle, or nil when nothing was drawn.
     func draw(_ p: KrkrEmotePlayer, into rgba: UnsafeMutablePointer<UInt8>, width: Int, height: Int, pitch: Int,
               transform: [Double]) -> (Int, Int, Int, Int)? {
-        guard p.shown, let gpu, let queue, let finisher, width > 0, height > 0 else { return nil }
+        guard p.shown, let gpu, let queue, let finisher, width > 0, height > 0 else {
+            if Self.trace { FileHandle.standardError.write("emote host: not drawn (shown \(p.shown), gpu \(self.gpu != nil))\n".data(using: .utf8)!) }
+            return nil
+        }
         let tint = p.tint
-        guard tint.a > 0 else { return nil }
+        guard tint.a > 0 else {
+            if Self.trace { FileHandle.standardError.write("emote host: not drawn (tint \(tint))\n".data(using: .utf8)!) }
+            return nil
+        }
         if target == nil || target!.width != width || target!.height != height {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
             d.usage = [.renderTarget, .shaderRead]
@@ -229,7 +235,15 @@ public final class KrkrEmoteHost {
         buffer.commit()
         buffer.waitUntilCompleted()
         let rendered = Self.trace ? Date() : nil
-        guard let r = finisher.covered else { return nil }
+        guard let r = finisher.covered else {
+            if Self.trace {
+                traceCount += 1
+                if traceCount % 120 == 1 {
+                    FileHandle.standardError.write("emote host: nothing covered; items \(prepared.map { $0.itemCount }) place \(place) tint \(tint) timelines \(p.playingLabels) pose \(pose.filter { $0.value != 0 }.count)/\(pose.count) models \(p.models.count) base \(p.models[0].baseObject)/\(p.models[0].baseMotion) has \(p.models[0].objects[p.models[0].baseObject]?[p.models[0].baseMotion] != nil) objects \(p.models[0].objects.keys.sorted().prefix(5))\n".data(using: .utf8)!)
+                }
+            }
+            return nil
+        }
         finished.getBytes(rgba + r.1 * pitch + r.0 * 4, bytesPerRow: pitch,
                           from: MTLRegionMake2D(r.0, r.1, r.2 - r.0, r.3 - r.1), mipmapLevel: 0)
         if Self.trace, let started, let evaluated, let rendered {

@@ -120,8 +120,8 @@ set(KRKR2_PLUGIN_SOURCES
     getSample layerExPerspective fftgraph LayerExBase xp3filter fstat/main)
 list(TRANSFORM KRKR2_PLUGIN_SOURCES PREPEND "${KRKR2}/plugins/")
 list(TRANSFORM KRKR2_PLUGIN_SOURCES APPEND ".cpp")
-# wamsoft's originals (KiriKiri licence; Vendor/upstream-plugins, pinned in fetch.sh) and
-# 3c1u/TextRender (Apache-2.0 / MIT), built in as static plug-ins: each file is compiled with
+# wamsoft's originals (KiriKiri licence; Vendor/upstream-plugins, pinned in fetch.sh), built in
+# as static plug-ins: each file is compiled with
 # its plug-in name, and shiori_plugin_links.cpp runs their link entry points when a game links
 # the DLL name.
 set(UPSTREAM "${VENDOR}/upstream-plugins")
@@ -145,7 +145,6 @@ shiori_plugin(layerExBTOA layerExBTOA.dll "${UPSTREAM}/wamsoft/layerExBTOA" Main
 shiori_plugin(layerExImage layerExImage.dll "${UPSTREAM}/wamsoft/layerExImage" LayerExImage.cpp Main.cpp LicensesGen.cpp)
 shiori_plugin(layerExRaster layerExRaster.dll "${UPSTREAM}/wamsoft/layerExRaster" main.cpp)
 shiori_plugin(shrinkCopy shrinkCopy.dll "${UPSTREAM}/wamsoft/shrinkCopy" main.cpp)
-shiori_plugin(textrender textrender.dll "${UPSTREAM}/3c1u/TextRender" textrender.cc)
 # krkrsdl3's (KiriKiri licence plus its publish-your-changes term) for the few with no other
 # source: PackinOne, lzfs, gfxEffect, and LayerExDraw on plutovg.
 shiori_plugin(PackinOne PackinOne.dll "${SDL3PLUGINS}" PackinOne.cpp)
@@ -160,7 +159,8 @@ set(SHIORI_SOURCES "${HERE}/shiorikrkr_host.mm" "${HERE}/cx_decrypt.cpp" "${HERE
 set(SOURCES ${SHIORI_SOURCES} ${PARSERS} "${GEN}/tjsDateWordMap.inc" ${TJS2_SOURCES} ${BASE_SOURCES} ${VISUAL_SOURCES}
     ${SOUND_SOURCES} ${UTILS_SOURCES} ${OTHER_CORE_SOURCES} ${SHIORI_ENVIRON_SOURCES}
     ${KRKR2_PLUGIN_SOURCES} ${PLUGIN_SOURCES} "${HERE}/getlangname.cpp" "${HERE}/shiori_plugin_links.cpp"
-    "${HERE}/shiorikrkr_emote.cpp" "${HERE}/shiorikrkr_motion.cpp" "${HERE}/shiorikrkr_motionplayer.cpp")
+    "${HERE}/shiorikrkr_emote.cpp" "${HERE}/shiorikrkr_motion.cpp" "${HERE}/shiorikrkr_motionplayer.cpp" "${HERE}/shiorikrkr_psbfile.cpp"
+    "${HERE}/plugins/shiori_textrender.cpp")
 
 option(SHIORIKRKR_DEBUG_THROW "Backtrace every C++ throw (SHIORIKRKR_TRACE_THROW=1)" OFF)
 if(SHIORIKRKR_DEBUG_THROW)
