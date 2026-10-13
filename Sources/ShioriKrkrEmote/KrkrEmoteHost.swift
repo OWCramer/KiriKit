@@ -126,12 +126,23 @@ public final class KrkrEmoteHost {
                 metadata.append(hit.metadata)
                 continue
             }
+            let t0 = CACurrentMediaTime()
             let bytes = LZ4Frame.isFrame(file.bytes) ? try LZ4Frame.decode(file.bytes) : file.bytes
-            let psb = try PSBFile(psz: bytes, bodySeed: seed)
-            if psb.seed != 0 { seed = psb.seed }
+            let t1 = CACurrentMediaTime()
+            let psb = try PSBFile(psz: bytes, bodySeed: seed, candidateSeeds: Self.knownSeeds)
+            if psb.seed != 0 {
+                seed = psb.seed
+                Self.remember(seed: psb.seed)
+            }
+            let t2 = CACurrentMediaTime()
             let model = try EmoteModel(psb: psb)
             let meta = psb.root["metadata"] ?? .null
+            let t3 = CACurrentMediaTime()
             if let gpu { _ = gpu.textures(for: model) }
+            if Self.timing {
+                print(String(format: "E-mote load %@: LZ4 %.0f ms, PSB %.0f ms, model %.0f ms, textures %.0f ms", file.name,
+                             (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t2) * 1000, (CACurrentMediaTime() - t3) * 1000))
+            }
             cache[key] = (model, meta)
             cacheOrder.append(key)
             if cacheOrder.count > 8 { cache[cacheOrder.removeFirst()] = nil }
@@ -269,6 +280,19 @@ public final class KrkrEmoteHost {
         print(String(format: "E-mote draw (600): pose %.2f ms, draw list %.2f ms, prepare %.2f ms each",
                      timed.pose / n, timed.list / n, timed.prepare / n))
         timed = (0, 0, 0, 0)
+    }
+
+    /// Titles' PSB seeds found before (one per title), kept between launches: finding one from
+    /// a model alone took about 170 ms of the first character's load.
+    private static let seedsKey = "ShioriKrkrEmoteSeeds"
+    static var knownSeeds: [UInt32] {
+        (UserDefaults.standard.array(forKey: seedsKey) as? [Int])?.map { UInt32(truncatingIfNeeded: $0) } ?? []
+    }
+    static func remember(seed: UInt32) {
+        var seeds = knownSeeds
+        guard !seeds.contains(seed) else { return }
+        seeds.insert(seed, at: 0)
+        UserDefaults.standard.set(seeds.prefix(16).map { Int($0) }, forKey: seedsKey)
     }
 
     /// Models drawn lately, and when: their textures stay on the GPU. With more characters on
