@@ -103,7 +103,7 @@ index 757f829..7d70232 100644
  // TVPRestartScriptEngine
  //---------------------------------------------------------------------------
 diff --git a/cpp/core/base/StorageIntf.cpp b/cpp/core/base/StorageIntf.cpp
-index e0f1f66..270f404 100644
+index e0f1f66..0e33d61 100644
 --- a/cpp/core/base/StorageIntf.cpp
 +++ b/cpp/core/base/StorageIntf.cpp
 @@ -552,6 +552,12 @@ void TVPGetLocalName(ttstr &name) {
@@ -133,6 +133,66 @@ index e0f1f66..270f404 100644
  
  //---------------------------------------------------------------------------
  struct tTVPClearAutoPathCacheCallback : public tTVPCompactEventCallbackIntf {
+@@ -930,6 +943,12 @@ void TVPAddAutoPath(const ttstr &name) {
+ 
+     auto i =
+         std::find(TVPAutoPathList.begin(), TVPAutoPathList.end(), normalized);
++#ifdef SHIORIKRKR
++    // Shiori: a path already on the list changes nothing, so the table (thousands of files,
++    // rebuilt on the next lookup) stays; Ninja Girl adds the same path at every particle set.
++    if(i != TVPAutoPathList.end())
++        return;
++#endif
+     if(i == TVPAutoPathList.end())
+         TVPAutoPathList.push_back(normalized);
+ 
+@@ -949,6 +968,10 @@ void TVPRemoveAutoPath(const ttstr &name) {
+ 
+     auto i =
+         std::find(TVPAutoPathList.begin(), TVPAutoPathList.end(), normalized);
++#ifdef SHIORIKRKR
++    if(i == TVPAutoPathList.end())
++        return; // not on the list: nothing changes
++#endif
+     if(i != TVPAutoPathList.end())
+         TVPAutoPathList.erase(i);
+ 
+@@ -1230,6 +1253,35 @@ void TVPClearStorageCaches() {
+ }
+ //---------------------------------------------------------------------------
+ 
++#ifdef SHIORIKRKR
++// Shiori: a file was written, moved or deleted (fstat's file operations): the auto path table is
++// rebuilt only when the file is in one of its folders (or is an archive); otherwise only the
++// name lookups are forgotten. Ninja Girl moves a save file into place at every particle set,
++// and each rebuild listed all 5,442 files of its archives again.
++void TVPShioriStorageChanged(const ttstr &name) {
++    tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
++    const ttstr normalized = TVPNormalizeStorageName(name);
++    const tjs_char *s = normalized.c_str();
++    const tjs_char *slash = nullptr;
++    for(const tjs_char *p = s; *p; ++p)
++        if(*p == TJS_W('/') || *p == TVPArchiveDelimiter) slash = p;
++    const ttstr folder = slash ? ttstr(s, int(slash - s + 1)) : ttstr();
++    ttstr ext = TVPExtractStorageExt(normalized);
++    ext.ToLowerCase();
++    bool listed = folder.IsEmpty() || ext == TJS_W(".xp3");
++    for(const ttstr &path : TVPAutoPathList)
++        if(path == folder) listed = true;
++    if(getenv("SHIORIKRKR_TRACE_AUTOPATH"))
++        TVPAddLog(ttstr(TJS_W("Shiori storage changed: ")) + normalized + (listed ? TJS_W(" (auto path table rebuilt)") : TJS_W("")));
++    if(listed) {
++        TVPClearXP3SegmentCache();
++        TVPClearAutoPathCache();
++    } else {
++        TVPAutoPathCache.Clear();
++    }
++}
++#endif
++
+ void TVPRemoveFromStorageCache(const ttstr &name) {
+     TVPAutoPathCache.Delete(name);
+ }
 diff --git a/cpp/core/base/SysInitIntf.cpp b/cpp/core/base/SysInitIntf.cpp
 index da49809..83caf5b 100644
 --- a/cpp/core/base/SysInitIntf.cpp
@@ -1658,6 +1718,46 @@ index af56fa5..339f135 100644
  }
  
  tTVPAtExit _NI_LayerExBase_unInit(TVP_ATEXIT_PRI_PREPARE,
+diff --git a/cpp/plugins/fstat/main.cpp b/cpp/plugins/fstat/main.cpp
+index 5418b7f..782fd1a 100644
+--- a/cpp/plugins/fstat/main.cpp
++++ b/cpp/plugins/fstat/main.cpp
+@@ -102,6 +102,10 @@ namespace helper {
+ /**
+  * メソッド追加用
+  */
++#ifdef SHIORIKRKR
++// Shiori (StorageIntf.cpp): the storage caches after a file changed, cleared only as far as needed.
++void TVPShioriStorageChanged(const ttstr &name);
++#endif
+ class StoragesFstat {
+ 
+     /**
+@@ -389,7 +393,11 @@ public:
+                           TJS_W("Failed"));
+             } else {
+                 // 削除に成功した場合はストレージキャッシュをクリア
++#ifdef SHIORIKRKR
++                TVPShioriStorageChanged(TVPGetPlacedPath(file));
++#else
+                 TVPClearStorageCaches();
++#endif
+             }
+         }
+         return r;
+@@ -427,7 +435,12 @@ public:
+                 TVPAddLog(ttstr(TJS_W("moveFile : ")) + fromFile + ", " +
+                           toFile + TJS_W("Failed"));
+             } else {
++#ifdef SHIORIKRKR
++                TVPShioriStorageChanged(ttstr(from));
++                TVPShioriStorageChanged(ttstr(to));
++#else
+                 TVPClearStorageCaches();
++#endif
+             }
+         }
+         return r;
 diff --git a/cpp/plugins/windowEx.cpp b/cpp/plugins/windowEx.cpp
 index 7471472..4d7469b 100644
 --- a/cpp/plugins/windowEx.cpp
