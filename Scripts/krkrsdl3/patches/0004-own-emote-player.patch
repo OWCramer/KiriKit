@@ -1,0 +1,20 @@
+diff --git a/plugins/DrawDeviceD3D/DrawDeviceD3D_reg.cpp b/plugins/DrawDeviceD3D/DrawDeviceD3D_reg.cpp
+index 0a2752d..08bb8e2 100644
+--- a/plugins/DrawDeviceD3D/DrawDeviceD3D_reg.cpp
++++ b/plugins/DrawDeviceD3D/DrawDeviceD3D_reg.cpp
+@@ -142,6 +142,7 @@ NCB_REGISTER_CLASS(D3DPicture)
+ //---------------------------------------------------------------------------
+ // D3DEmotePlayer 脚本类（包装 emoteplayer 的 GPU 直通播放器）
+ //---------------------------------------------------------------------------
++#ifndef SHIORIKRKR_OWN_EMOTE // Shiori registers its own D3DEmotePlayer (shiorikrkr_emote.cpp)
+ NCB_REGISTER_CLASS(D3DEmotePlayer)
+ {
+     NCB_CONSTRUCTOR((iTJSDispatch2*));
+@@ -184,6 +185,7 @@ NCB_REGISTER_CLASS(D3DEmotePlayer)
+     NCB_PROPERTY(hairScale, getHairScale, setHairScale);
+     NCB_PROPERTY(partsScale, getPartsScale, setPartsScale);
+ }
++#endif
+ 
+ //---------------------------------------------------------------------------
+ // Layer 附加属性：drawPlane / frontIndex / backIndex

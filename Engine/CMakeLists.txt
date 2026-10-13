@@ -43,6 +43,10 @@ set(SOURCES ${KRKRSDL_CORE_SRC} ${KRKRSDL_ENVIRON_SRC} ${KRKRSDL_PLUGINS_SRC} ${
 # SDL's main is the host app's, not krkrsdl3's; movies are Shiori's (shiorikrkr_movie.cpp) in
 # place of krkrsdl3's Apple stubs.
 list(REMOVE_ITEM SOURCES "${KRKRSDL3}/environ/sdl3/sdl3_entry.cpp" "${KRKRSDL3}/environ/apple/apple_video.mm")
+# E-mote is Shiori's (shiorikrkr_emote.cpp and the host's renderer): krkrsdl3's emoteplayer and
+# motionplayer plug-ins and its D3DEmotePlayer aren't built (their lineage is unaudited).
+list(FILTER SOURCES EXCLUDE REGEX "/plugins/emoteplayer/")
+list(REMOVE_ITEM SOURCES "${KRKRSDL3}/plugins/DrawDeviceD3D/D3DEmotePlayer.cpp" "${KRKRSDL3}/plugins/motionPlayer.cpp")
 list(APPEND SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_host.mm"
     "${CMAKE_CURRENT_SOURCE_DIR}/cx_decrypt.cpp"
@@ -50,7 +54,10 @@ list(APPEND SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/cursor_decode.mm"
     "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_movie.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/nekoworks.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/getlangname.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/getlangname.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_emote.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_motion.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_motionplayer.cpp")
 
 option(SHIORIKRKR_DEBUG_THROW "Backtrace every C++ throw (SHIORIKRKR_TRACE_THROW=1)" OFF)
 if(SHIORIKRKR_DEBUG_THROW)
@@ -60,7 +67,7 @@ endif()
 add_library(ShioriKrkr SHARED ${SOURCES})
 set_target_properties(ShioriKrkr PROPERTIES OUTPUT_NAME ShioriKrkr)
 
-target_compile_definitions(ShioriKrkr PRIVATE _KRKRSDL3_USE_SDL3=1 NDEBUG=1)
+target_compile_definitions(ShioriKrkr PRIVATE _KRKRSDL3_USE_SDL3=1 NDEBUG=1 SHIORIKRKR_OWN_EMOTE=1)
 if(IOS)
     target_compile_definitions(ShioriKrkr PRIVATE _KRKRSDL3_IOS=1)
 else()

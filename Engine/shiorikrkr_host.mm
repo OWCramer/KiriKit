@@ -34,6 +34,7 @@
 #include "shiorikrkr_presenter.h"
 #include "cursor_decode.h"
 #include "shiorikrkr_movie.h"
+#include "shiorikrkr_emote.h"
 #include <deque>
 #include <functional>
 #include <map>
@@ -229,8 +230,9 @@ int evaluate(const std::string &expression, std::string &text) {
 SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
     Host &h = host();
     if (h.started) return SHIORIKRKR_ERROR_STATE;
-    if (!config || config->struct_size < sizeof(shiorikrkr_config_t) || !config->game_root)
+    if (!config || config->struct_size < offsetof(shiorikrkr_config_t, emote) || !config->game_root)
         return SHIORIKRKR_ERROR_ARGUMENTS;
+    shiorikrkr::setEmoteHost(config->struct_size >= sizeof(shiorikrkr_config_t) ? config->emote : nullptr);
     h.log = config->log;
     h.logContext = config->log_context;
     h.message = config->message;
@@ -541,6 +543,7 @@ SHIORIKRKR_EXPORT void shiorikrkr_stop(void) {
     TVPHostRenderBackendFactory = nullptr;
     TVPHostMessageBox = nullptr;
     TVPHostMouseCursor = nullptr;
+    shiorikrkr::setEmoteHost(nullptr);
     h.cursorFiles.clear();
     h.input.clear();
     h.cursor = 0;

@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-#define SHIORIKRKR_API_VERSION 2
+#define SHIORIKRKR_API_VERSION 3
 
 /* One line of the engine's log (UTF-8, no newline). */
 typedef void (*shiorikrkr_log_fn)(void *context, const char *line);
@@ -32,6 +32,42 @@ typedef void (*shiorikrkr_log_fn)(void *context, const char *line);
  * with the first button. */
 typedef int32_t (*shiorikrkr_message_fn)(void *context, const char *text, const char *caption,
                                          const char *const *buttons, int32_t button_count);
+
+/* E-mote characters (NEKOPARA's): the engine keeps the game's script objects (D3DEmotePlayer
+ * and the Motion classes) and hands the models, every command and every draw to the host's
+ * own E-mote player, through this table. All calls on the engine's thread. */
+typedef struct shiorikrkr_emote_host {
+    uint32_t struct_size;            /* sizeof(shiorikrkr_emote_host_t) */
+    void *context;
+    /* A player for one character: its PSB files (read and decrypted from the archives in
+     * memory, never written out), in the order the game names them. NULL when none can be
+     * read; error then holds why (UTF-8, cut to capacity). */
+    void *(*create)(void *context, const uint8_t *const *data, const uint64_t *sizes,
+                    const char *const *names, int32_t count, char *error, uint32_t capacity);
+    /* A second player with the same models and state (the game copies a layer for a
+     * transition). */
+    void *(*clone)(void *context, void *player);
+    void (*destroy)(void *context, void *player);
+    /* A command by name with a label (a variable or timeline, may be "") and numbers:
+     * progress(frames), skip, pass, show, coord(x, y, frames, easing), rot(radians, frames,
+     * easing), scale(s, frames, easing), color(rgba, frames, easing), variable(value, frames,
+     * easing), play(flags), stop, fadeout(frames, easing), blend(ratio, frames, easing,
+     * stop when 0), wind(start, goal, speed, min, max), windstop, controls(mesh division,
+     * bust, hair, parts scale). */
+    void (*command)(void *context, void *player, const char *verb, const char *label,
+                    const double *numbers, int32_t count);
+    /* A question: variable, playing, blend, animating, loop, count with label main / diff /
+     * playing, flags(index), contains(x, y) with a layer label. Labels asked for by index
+     * (label with label main / diff / playing and the index) come back in out. */
+    double (*query)(void *context, void *player, const char *verb, const char *label,
+                    const double *numbers, int32_t count, char *out, uint32_t capacity);
+    /* Draws the character into rgba (R, G, B, A bytes, straight alpha, cleared by the host)
+     * of width x height, through transform (a, b, c, d, tx, ty: x' = a x + c y + tx,
+     * y' = b x + d y + ty, from the character's own space centred on the canvas). Returns 1
+     * when it drew anything. */
+    int32_t (*draw)(void *context, void *player, uint8_t *rgba, int32_t width, int32_t height,
+                    int32_t pitch, const double *transform);
+} shiorikrkr_emote_host_t;
 
 typedef struct shiorikrkr_config {
     uint32_t struct_size;            /* sizeof(shiorikrkr_config_t) */
@@ -57,6 +93,8 @@ typedef struct shiorikrkr_config {
     /* Non-zero: frames stay with the host (shiorikrkr_frame) and SDL draws nothing; zero:
      * SDL's own renderer draws into the engine view (the spike's path). */
     int32_t host_presents;
+    /* Since API version 3. NULL: E-mote characters aren't drawn. */
+    const shiorikrkr_emote_host_t *emote;
 } shiorikrkr_config_t;
 
 enum {

@@ -15,6 +15,8 @@
 #import <Foundation/Foundation.h>
 
 #include <cstdio>
+#include <cstdlib>
+#include <dlfcn.h>
 #include <map>
 #include <string>
 #include <thread>
@@ -114,6 +116,17 @@ int main(int argc, char **argv) {
             return 0;
         };
         config.host_presents = present ? 1 : 0;
+        // Shiori's E-mote player (ShioriKrkrEmoteHarness, a Swift library run-harness.sh
+        // builds), when SHIORIKRKR_EMOTE_LIB names it.
+        if (const char *lib = getenv("SHIORIKRKR_EMOTE_LIB"); lib && *lib) {
+            if (void *handle = dlopen(lib, RTLD_NOW)) {
+                using TableFn = const shiorikrkr_emote_host_t *(*)();
+                if (auto table = reinterpret_cast<TableFn>(dlsym(handle, "shiorikrkr_emote_harness_table")))
+                    config.emote = table();
+            } else {
+                std::printf("== E-mote library: %s\n", dlerror());
+            }
+        }
 
         for (int session = 0; session < sessions; ++session) {
         const auto started = std::chrono::steady_clock::now();
