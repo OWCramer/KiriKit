@@ -40,13 +40,15 @@ foreach(list core environ plugins tjs2)
 endforeach()
 
 set(SOURCES ${KRKRSDL_CORE_SRC} ${KRKRSDL_ENVIRON_SRC} ${KRKRSDL_PLUGINS_SRC} ${KRKRSDL_TJS2_SRC})
-# SDL's main is the host app's, not krkrsdl3's.
-list(REMOVE_ITEM SOURCES "${KRKRSDL3}/environ/sdl3/sdl3_entry.cpp")
+# SDL's main is the host app's, not krkrsdl3's; movies are Shiori's (shiorikrkr_movie.cpp) in
+# place of krkrsdl3's Apple stubs.
+list(REMOVE_ITEM SOURCES "${KRKRSDL3}/environ/sdl3/sdl3_entry.cpp" "${KRKRSDL3}/environ/apple/apple_video.mm")
 list(APPEND SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_host.mm"
     "${CMAKE_CURRENT_SOURCE_DIR}/cx_decrypt.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_presenter.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/cursor_decode.mm")
+    "${CMAKE_CURRENT_SOURCE_DIR}/cursor_decode.mm"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_movie.cpp")
 
 option(SHIORIKRKR_DEBUG_THROW "Backtrace every C++ throw (SHIORIKRKR_TRACE_THROW=1)" OFF)
 if(SHIORIKRKR_DEBUG_THROW)
@@ -105,6 +107,13 @@ target_link_libraries(ShioriKrkr PRIVATE
     WebP::webp WebP::webpdecoder WebP::webpdemux
     oniguruma::onig Opus::opus OpusFile::opusfile
     SDL3::SDL3 SDL3_ttf::SDL3_ttf plutovg::plutovg)
+
+# FFmpeg (LGPL-2.1+, the ASF demuxer and WMV 9 / WMA 2 decoders): the app's
+# Vendor/ShioriFFmpeg.xcframework slice on iOS, build/ffmpeg-macos for the harness.
+set(FFMPEG_INCLUDE "" CACHE PATH "FFmpeg headers")
+set(FFMPEG_LIBRARY "" CACHE FILEPATH "FFmpeg static library (libffmpeg.a)")
+target_include_directories(ShioriKrkr PRIVATE "${FFMPEG_INCLUDE}")
+target_link_libraries(ShioriKrkr PRIVATE "${FFMPEG_LIBRARY}")
 
 # Only the C interface leaves the image.
 set(EXPORTS "${CMAKE_CURRENT_SOURCE_DIR}/exports.txt")

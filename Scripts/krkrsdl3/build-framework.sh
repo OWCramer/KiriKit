@@ -68,18 +68,25 @@ built=()
 for slice in "${SLICES[@]}"; do
     case $slice in
     macos)
-        configure_and_build macos arm64-osx -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+        [ -f "$ROOT/build/ffmpeg-macos/install/lib/libffmpeg.a" ] || "$ROOT/Scripts/krkrsdl3/build-ffmpeg-macos.sh"
+        configure_and_build macos arm64-osx -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DFFMPEG_INCLUDE="$ROOT/build/ffmpeg-macos/install/include" \
+            -DFFMPEG_LIBRARY="$ROOT/build/ffmpeg-macos/install/lib/libffmpeg.a"
         echo "== harness: $WORK/macos/shiorikrkr-harness"
         ;;
     simulator)
         configure_and_build simulator arm64-ios-simulator -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=$MIN_IOS
+            -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=$MIN_IOS \
+            -DFFMPEG_INCLUDE="$VENDOR/ShioriFFmpeg.xcframework/ios-arm64-simulator/Headers" \
+            -DFFMPEG_LIBRARY="$VENDOR/ShioriFFmpeg.xcframework/ios-arm64-simulator/libffmpeg.a"
         make_framework simulator iPhoneSimulator
         built+=(-framework "$WORK/frameworks/simulator/$NAME.framework")
         ;;
     device)
         configure_and_build device arm64-ios -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=$MIN_IOS
+            -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=$MIN_IOS \
+            -DFFMPEG_INCLUDE="$VENDOR/ShioriFFmpeg.xcframework/ios-arm64/Headers" \
+            -DFFMPEG_LIBRARY="$VENDOR/ShioriFFmpeg.xcframework/ios-arm64/libffmpeg.a"
         make_framework device iPhoneOS
         built+=(-framework "$WORK/frameworks/device/$NAME.framework")
         ;;

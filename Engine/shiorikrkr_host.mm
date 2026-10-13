@@ -32,6 +32,7 @@
 #include "cx_decrypt.h"
 #include "shiorikrkr_presenter.h"
 #include "cursor_decode.h"
+#include "shiorikrkr_movie.h"
 #include <deque>
 #include <functional>
 #include <map>
@@ -347,11 +348,43 @@ SHIORIKRKR_EXPORT void *shiorikrkr_take_view(void) {
 #endif
 }
 
+// The game's frame with an overlay-mode movie drawn over it at its rectangle (scaled to fit,
+// nearest pixel), recomposed only when either changes.
+static bool composeMovie(shiorikrkr::PresentedFrame &presented) {
+    static std::vector<uint8_t> composed;
+    static uint64_t composedGame = 0, composedMovie = 0, serial = 0;
+    std::lock_guard<std::mutex> lock(shiorikrkr::movieOverlayLock());
+    const shiorikrkr::MovieOverlayFrame *movie = shiorikrkr::movieOverlay();
+    if (!movie || !movie->visible || movie->rgba.empty()) return false;
+    if (presented.serial != composedGame || movie->serial != composedMovie || composed.empty()) {
+        composedGame = presented.serial;
+        composedMovie = movie->serial;
+        composed.assign(presented.pixels, presented.pixels + size_t(presented.pitch) * presented.height);
+        int l = movie->left, t = movie->top, r = movie->right, b = movie->bottom;
+        if (r <= l || b <= t) l = 0, t = 0, r = presented.width, b = presented.height;
+        for (int y = std::max(t, 0); y < std::min(b, presented.height); ++y) {
+            const int sy = (y - t) * movie->height / (b - t);
+            uint8_t *row = &composed[size_t(y) * presented.pitch];
+            const uint8_t *source = &movie->rgba[size_t(sy) * movie->width * 4];
+            for (int x = std::max(l, 0); x < std::min(r, presented.width); ++x) {
+                const int sx = (x - l) * movie->width / (r - l);
+                std::memcpy(row + x * 4, source + sx * 4, 4);
+            }
+        }
+        ++serial;
+    }
+    presented.pixels = composed.data();
+    presented.serial = (uint64_t(1) << 63) | serial;
+    presented.blank = false;
+    return true;
+}
+
 SHIORIKRKR_EXPORT int shiorikrkr_frame(shiorikrkr_frame_t *frame) {
     Host &h = host();
     if (!frame || !h.started || !h.presenter) return 0;
     shiorikrkr::PresentedFrame presented;
     if (!h.presenter->frame(presented)) return 0;
+    composeMovie(presented);
     frame->pixels = presented.pixels;
     frame->width = presented.width;
     frame->height = presented.height;
