@@ -15,6 +15,57 @@ index e0f1f66..94a22fe 100644
      if(TJS_strchr(name.c_str(), TVPArchiveDelimiter))
          return TJS_W("");
      // in-archive storage is always not accessible from local file
+diff --git a/cpp/core/base/SysInitIntf.cpp b/cpp/core/base/SysInitIntf.cpp
+index da49809..6d4263d 100644
+--- a/cpp/core/base/SysInitIntf.cpp
++++ b/cpp/core/base/SysInitIntf.cpp
+@@ -63,21 +63,30 @@ static void TVPCauseAtExit();
+ 
+ bool TVPSystemUninitCalled = false;
+ 
++#ifdef SHIORIKRKR
++#include <dlfcn.h>
++#define SHIORI_STOP_STEP(what) if(getenv("SHIORIKRKR_TRACE_STOP")) fprintf(stderr, "shutdown: %s\n", what);
++#else
++#define SHIORI_STOP_STEP(what)
++#endif
+ void TVPSystemUninit() {
+     if(TVPSystemUninitCalled)
+         return;
+     TVPSystemUninitCalled = true;
+ 
++    SHIORI_STOP_STEP("before uninit")
+     TVPBeforeSystemUninit();
+ 
+     TVPUninitTVPGL();
+ 
++    SHIORI_STOP_STEP("script engine")
+     try {
+         TVPUninitScriptEngine();
+     } catch(...) {
+         // ignore errors
+     }
+ 
++    SHIORI_STOP_STEP("after uninit")
+     TVPAfterSystemUninit();
+ 
+     TVPCauseAtExit();
+@@ -132,6 +141,15 @@ static void TVPCauseAtExit() {
+               TVPAtExitInfos->end()); // descending sort
+ 
+     for(auto i = TVPAtExitInfos->begin(); i != TVPAtExitInfos->end(); ++i) {
++#ifdef SHIORIKRKR
++        // Shiori: SHIORIKRKR_TRACE_STOP names each handler as shutdown reaches it.
++        if(getenv("SHIORIKRKR_TRACE_STOP")) {
++            Dl_info info{};
++            dladdr((void *)i->Handler, &info);
++            fprintf(stderr, "shutdown: at-exit %d %s\n", (int)i->Priority,
++                    info.dli_sname ? info.dli_sname : "?");
++        }
++#endif
+         i->Handler();
+     }
+ 
 diff --git a/cpp/core/base/TextStream.cpp b/cpp/core/base/TextStream.cpp
 index a70d4b6..ccd4304 100644
 --- a/cpp/core/base/TextStream.cpp
@@ -351,10 +402,20 @@ index 679ef2e..4fe229b 100644
          TVPRegisterWaveDecoderCreator(&RIFFWaveDecoderCreator);
          TVPRegisterWaveDecoderCreator(&vorbisWaveDecoderCreator);
 diff --git a/cpp/core/sound/win32/WaveImpl.cpp b/cpp/core/sound/win32/WaveImpl.cpp
-index 337d952..c193bec 100644
+index 337d952..09b3ef6 100644
 --- a/cpp/core/sound/win32/WaveImpl.cpp
 +++ b/cpp/core/sound/win32/WaveImpl.cpp
-@@ -1819,7 +1819,7 @@ tTVPWaveSoundBufferDecodeThread::~tTVPWaveSoundBufferDecodeThread() {
+@@ -1514,6 +1514,9 @@ tTVPWaveSoundBufferThread::tTVPWaveSoundBufferThread() :
+ 
+ //---------------------------------------------------------------------------
+ tTVPWaveSoundBufferThread::~tTVPWaveSoundBufferThread() {
++#ifdef SHIORIKRKR
++    Terminate(); // Shiori: before the wait, or the loop never sees it
++#endif
+     SetPriority(ttpNormal);
+     Resume();
+     Event.Set();
+@@ -1819,7 +1822,7 @@ tTVPWaveSoundBufferDecodeThread::~tTVPWaveSoundBufferDecodeThread() {
      Running = false;
      Terminate();
      Resume();
@@ -363,6 +424,70 @@ index 337d952..c193bec 100644
      WaitFor();
  }
  //---------------------------------------------------------------------------
+diff --git a/cpp/core/tjs2/tjsRegExp.cpp b/cpp/core/tjs2/tjsRegExp.cpp
+index f71ba61..283d990 100644
+--- a/cpp/core/tjs2/tjsRegExp.cpp
++++ b/cpp/core/tjs2/tjsRegExp.cpp
+@@ -17,6 +17,39 @@
+ 
+ #include <functional>
+ 
++
++#ifdef SHIORIKRKR
++// Shiori: in a UTF-16 Oniguruma pattern \xHH is a single byte (half a character, "too short
++// multibyte code string"). Scripts mean a character, as KiriKiri's earlier regex engine took it:
++// \xHHHH and \xHH become \x{HHHH} and \x{HH} (Ninja Girl's [\x0100-\xFFFF]).
++static void TJSShioriWidenRegExpHex(TJS::ttstr &expr) {
++    const tjs_char *p = expr.c_str();
++    std::u16string out;
++    bool changed = false;
++    auto hex = [](tjs_char c) {
++        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
++    };
++    for(size_t i = 0; p[i];) {
++        if(p[i] == '\\' && p[i + 1] == 'x' && hex(p[i + 2]) && hex(p[i + 3])) {
++            size_t n = (hex(p[i + 4]) && hex(p[i + 5])) ? 4 : 2;
++            out += u"\\x{";
++            out.append(p + i + 2, p + i + 2 + n);
++            out += u"}";
++            i += 2 + n;
++            changed = true;
++        } else if(p[i] == '\\' && p[i + 1]) {
++            out += p[i];
++            out += p[i + 1];
++            i += 2;
++        } else {
++            out += p[i++];
++        }
++    }
++    if(changed)
++        expr = TJS::ttstr(out.c_str());
++}
++#endif
++
+ namespace TJS {
+ 
+     //---------------------------------------------------------------------------
+@@ -279,6 +312,9 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ _compile) {
+         return TJS_E_BADPARAMCOUNT;
+ 
+     ttstr expr = *param[0];
++#ifdef SHIORIKRKR
++    TJSShioriWidenRegExpHex(expr);
++#endif
+ 
+     const tjs_char *p = expr.c_str();
+     if(!p || !p[0])
+@@ -638,6 +674,9 @@ void tTJSNC_RegExp::Compile(tjs_int numparams, tTJSVariant **param,
+ 
+     if(expr.IsEmpty())
+         expr = TJS_W("(?:)"); // generate empty regular expression
++#ifdef SHIORIKRKR
++    TJSShioriWidenRegExpHex(expr);
++#endif
+ 
+     if(_this->RegEx) {
+         onig_free(_this->RegEx);
 diff --git a/cpp/core/utils/win32/ThreadImpl.cpp b/cpp/core/utils/win32/ThreadImpl.cpp
 index afc1493..82c3759 100644
 --- a/cpp/core/utils/win32/ThreadImpl.cpp
