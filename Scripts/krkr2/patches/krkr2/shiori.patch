@@ -1,0 +1,611 @@
+diff --git a/cpp/core/base/TextStream.cpp b/cpp/core/base/TextStream.cpp
+index a70d4b6..e576220 100644
+--- a/cpp/core/base/TextStream.cpp
++++ b/cpp/core/base/TextStream.cpp
+@@ -5,7 +5,6 @@
+ 
+ #include "TextStream.h"
+ 
+-#include <opencv2/core/hal/interface.h>
+ #include <spdlog/spdlog.h>
+ 
+ #include "MsgIntf.h"
+diff --git a/cpp/core/base/UtilStreams.cpp b/cpp/core/base/UtilStreams.cpp
+index 42dc4c6..a8468ea 100644
+--- a/cpp/core/base/UtilStreams.cpp
++++ b/cpp/core/base/UtilStreams.cpp
+@@ -339,6 +339,8 @@ tjs_uint tTVPPartialStream::Write(const void *buffer, tjs_uint write_size) {
+ tjs_uint64 tTVPPartialStream::GetSize() { return Size; }
+ //---------------------------------------------------------------------------
+ 
++// Shiori: archive unpacking (libarchive, UnRAR) is krkr2's launcher feature; left out.
++#ifndef SHIORIKRKR
+ extern "C" {
+ #include <archive.h>
+ #include <archive_entry.h>
+@@ -933,3 +935,4 @@ tTVPUnpackArchive::~tTVPUnpackArchive() {
+     if(ArcThread)
+         delete ArcThread;
+ }
++#endif // SHIORIKRKR
+diff --git a/cpp/core/base/XP3Archive.cpp b/cpp/core/base/XP3Archive.cpp
+index 11d8371..d73fb99 100644
+--- a/cpp/core/base/XP3Archive.cpp
++++ b/cpp/core/base/XP3Archive.cpp
+@@ -20,6 +20,8 @@
+ 
+ #include <zlib.h>
+ #include <algorithm>
++#include <unordered_map>
++#include <unordered_set>
+ 
+ bool TVPAllowExtractProtectedStorage = true;
+ 
+@@ -34,6 +36,7 @@ void TVPSetXP3ArchiveExtractionFilter(tTVPXP3ArchiveExtractionFilter filter) {
+ //---------------------------------------------------------------------------
+ 
+ static tTVPXP3ArchiveContentFilter TVPXP3ArchiveContentFilter = nullptr;
++bool TVPXP3FilterOnlyFlaggedMembers = false; // Shiori
+ 
+ void TVPSetXP3ArchiveContentFilter(tTVPXP3ArchiveContentFilter filter) {
+     TVPXP3ArchiveContentFilter = filter;
+@@ -403,6 +406,74 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+                 TVPThrowExceptionMessage(TVPReadError);
+             }
+ 
++#ifdef SHIORIKRKR
++            // Shiori: 'hnfn' chunks (archives whose File entries carry hashed names) map an
++            // entry's adlr hash to its real name (u32 hash, u16 length, UTF-16 name). NEKO WORKs
++            // archives use the same layout under 'neko' (older ones: 'eliF'); their unnamed
++            // entries are decoys (a startup.tjs that only reports a corrupted file).
++            static const tjs_uint8 cn_hnfn[] = {0x68, 0x6e, 0x66, 0x6e};
++            static const tjs_uint8 cn_neko[] = {0x6e, 0x65, 0x6b, 0x6f};
++            static const tjs_uint8 cn_elif[] = {0x65, 0x6c, 0x69, 0x46};
++            std::unordered_map<tjs_uint32, ttstr> hashed_names;
++            // Every name a hash has, in index order: entries with identical contents share a
++            // hash, and where the name chunks aren't next to their File chunks (NEKOPARA Vol. 2)
++            // the n-th such entry takes the n-th name.
++            std::unordered_map<tjs_uint32, std::vector<ttstr>> names_by_hash;
++            std::unordered_map<tjs_uint32, size_t> names_used;
++            std::unordered_set<std::string> hashed_name_set; // normalized
++            bool neko_names = false;
++            for(const tjs_uint8 *cn_names : {cn_hnfn, cn_neko, cn_elif}) {
++                tjs_uint ch_start = 0;
++                tjs_uint ch_size = index_size;
++                while(FindChunk(indexdata, cn_names, ch_start, ch_size)) {
++                    if(cn_names != cn_hnfn)
++                        neko_names = true;
++                    if(ch_size >= 6) {
++                        tjs_uint32 hash = ReadI32FromMem(indexdata + ch_start);
++                        tjs_uint len = ReadI16FromMem(indexdata + ch_start + 4);
++                        if(6 + len * 2 <= ch_size) {
++                            ttstr real = TVPStringFromBMPUnicode(
++                                (const tjs_uint16 *)(indexdata + ch_start + 6), len);
++                            hashed_names[hash] = real;
++                            names_by_hash[hash].push_back(real);
++                            NormalizeInArchiveStorageName(real);
++                            hashed_name_set.insert(real.AsStdString());
++                        }
++                    }
++                    ch_start += ch_size;
++                    ch_size = index_size - ch_start;
++                }
++            }
++            // A name chunk names the File chunk right after it, so entries that share a hash
++            // still get both names.
++            std::unordered_map<tjs_uint, ttstr> names_by_position; // File body offset -> name
++            if(!hashed_names.empty()) {
++                ttstr pending;
++                bool have_pending = false;
++                tjs_uint pos = 0;
++                while(pos + 12 <= index_size) {
++                    const tjs_uint8 *tag = indexdata + pos;
++                    tjs_uint64 size = ReadI64FromMem(indexdata + pos + 4);
++                    tjs_uint body = pos + 12;
++                    if(size > index_size - body)
++                        break;
++                    if(!memcmp(tag, cn_hnfn, 4) || !memcmp(tag, cn_neko, 4) || !memcmp(tag, cn_elif, 4)) {
++                        if(size >= 6) {
++                            tjs_uint len = ReadI16FromMem(indexdata + body + 4);
++                            if(6 + len * 2 <= size) {
++                                pending = TVPStringFromBMPUnicode((const tjs_uint16 *)(indexdata + body + 6), len);
++                                have_pending = true;
++                            }
++                        }
++                    } else if(!memcmp(tag, cn_File, 4)) {
++                        if(have_pending)
++                            names_by_position[body] = pending;
++                        have_pending = false;
++                    }
++                    pos = body + (tjs_uint)size;
++                }
++            }
++#endif
+             // read index information from memory
+             tjs_uint ch_file_start = 0;
+             tjs_uint ch_file_size = index_size;
+@@ -411,6 +482,9 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+                 // find 'File' chunk
+                 if(!FindChunk(indexdata, cn_File, ch_file_start, ch_file_size))
+                     break; // not found
++#ifdef SHIORIKRKR
++                const tjs_uint this_file_body = ch_file_start;
++#endif
+ 
+                 // find 'info' sub-chunk
+                 tjs_uint ch_info_start = ch_file_start;
+@@ -426,6 +500,7 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+                    (flags & TVP_XP3_FILE_PROTECTED))
+                     TVPThrowExceptionMessage(
+                         TVPSpecifiedStorageHadBeenProtected);
++                item.InfoFlags = flags; // Shiori
+                 item.OrgSize = ReadI64FromMem(indexdata + ch_info_start + 4);
+                 item.ArcSize = ReadI64FromMem(indexdata + ch_info_start + 12);
+ 
+@@ -487,6 +562,36 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+ 
+                 // read 'aldr' sub-chunk
+                 item.FileHash = ReadI32FromMem(indexdata + ch_adlr_start);
++#ifdef SHIORIKRKR
++                bool decoy = false;
++                if(!hashed_names.empty()) {
++                    auto positional = names_by_position.find(this_file_body);
++                    auto real = hashed_names.find(item.FileHash);
++                    if(positional != names_by_position.end() || real != hashed_names.end()) {
++                        if(positional != names_by_position.end())
++                            item.Name = positional->second;
++                        else {
++                            const auto &all = names_by_hash[item.FileHash];
++                            size_t &used = names_used[item.FileHash];
++                            item.Name = used < all.size() ? all[used++] : real->second;
++                        }
++                        if(normalizeName)
++                            NormalizeInArchiveStorageName(item.Name);
++                    } else {
++                        // A plainly named entry that a hashed name also claims (startup.tjs)
++                        // is a decoy for extractors; the hashed entry is the real file.
++                        ttstr plain = item.Name;
++                        NormalizeInArchiveStorageName(plain);
++                        decoy = neko_names || hashed_name_set.count(plain.AsStdString()) != 0;
++                    }
++                }
++                if(!decoy) {
++                    ItemVector.push_back(item);
++                    Count++;
++                }
++                ch_file_start += ch_file_size;
++                ch_file_size = index_size - ch_file_start;
++#else
+ 
+                 // push information
+                 ItemVector.push_back(item);
+@@ -495,6 +600,7 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+                 ch_file_start += ch_file_size;
+                 ch_file_size = index_size - ch_file_start;
+                 Count++;
++#endif
+             }
+ 
+             if(!(index_flag & TVP_XP3_INDEX_CONTINUE))
+@@ -995,7 +1101,8 @@ tjs_uint tTVPXP3ArchiveStream::Read(void *buffer, tjs_uint read_size) {
+         }
+ 
+         // execute filter (for encryption method)
+-        if(TVPXP3ArchiveExtractionFilter) {
++        if(TVPXP3ArchiveExtractionFilter &&
++           (!TVPXP3FilterOnlyFlaggedMembers || Owner->GetInfoFlags(StorageIndex) != 0)) {
+             tTVPXP3ExtractionFilterInfo info(
+                 CurPos, (tjs_uint8 *)buffer + write_size, one_size,
+                 Owner->GetFileHash(StorageIndex), Owner->GetName(StorageIndex));
+diff --git a/cpp/core/base/XP3Archive.h b/cpp/core/base/XP3Archive.h
+index 8b6c0e7..34f38f1 100644
+--- a/cpp/core/base/XP3Archive.h
++++ b/cpp/core/base/XP3Archive.h
+@@ -62,6 +62,9 @@ TJS_EXP_FUNC_DEF(void, TVPSetXP3ArchiveExtractionFilter,
+ 
+ TJS_EXP_FUNC_DEF(void, TVPSetXP3ArchiveContentFilter,
+                  (tTVPXP3ArchiveContentFilter filter));
++// Shiori: when set, the extraction filter only runs on members whose 'info' flags are
++// non-zero (an archive's plainly stored members, such as its extraction warning, stay as they are).
++extern bool TVPXP3FilterOnlyFlaggedMembers;
+ //---------------------------------------------------------------------------
+ 
+ //---------------------------------------------------------------------------
+@@ -100,6 +103,7 @@ public:
+         tjs_uint32 FileHash{};
+         tjs_uint64 OrgSize{}; // original ( uncompressed ) size
+         tjs_uint64 ArcSize{}; // in-archive size
++        tjs_uint32 InfoFlags = 0; // Shiori: the 'info' chunk's flags (0: stored plain)
+         std::vector<tTVPXP3ArchiveSegment> Segments;
+ 
+         bool operator<(const tArchiveItem &rhs) const {
+@@ -135,6 +139,9 @@ public:
+     [[nodiscard]] tjs_uint32 GetFileHash(tjs_uint idx) const {
+         return ItemVector[idx].FileHash;
+     }
++    [[nodiscard]] tjs_uint32 GetInfoFlags(tjs_uint idx) const {
++        return ItemVector[idx].InfoFlags;
++    }
+ 
+     ttstr GetName(tjs_uint idx) override { return ItemVector[idx].Name; }
+ 
+diff --git a/cpp/core/base/impl/StorageImpl.cpp b/cpp/core/base/impl/StorageImpl.cpp
+index 966d7b9..5a3570a 100644
+--- a/cpp/core/base/impl/StorageImpl.cpp
++++ b/cpp/core/base/impl/StorageImpl.cpp
+@@ -14,7 +14,11 @@
+ #include <fcntl.h>
+ #include <filesystem>
+ #include <sys/stat.h>
++#ifndef SHIORIKRKR
+ #include <cocos/cocos2d.h>
++#else
++#include <unistd.h>
++#endif
+ 
+ #include "MsgIntf.h"
+ 
+diff --git a/cpp/core/environ/win32/TVPWindow.h b/cpp/core/environ/win32/TVPWindow.h
+index f1f07ee..9769d25 100644
+--- a/cpp/core/environ/win32/TVPWindow.h
++++ b/cpp/core/environ/win32/TVPWindow.h
+@@ -433,7 +433,11 @@ public:
+     [[nodiscard]] bool GetInnerSunken() const { return false; }
+ 
+     // TODO
++#ifdef SHIORIKRKR
++    virtual void SetMouseCursor(tjs_int handle) {}
++#else
+     void SetMouseCursor(tjs_int handle) {}
++#endif
+     void SetHintText(iTJSDispatch2 *sender, const ttstr &text) {}
+     void DisableAttentionPoint() {}
+     static void GetVideoOffset(tjs_int &ofsx, tjs_int &ofsy) {
+diff --git a/cpp/core/plugin/ncbind.hpp b/cpp/core/plugin/ncbind.hpp
+index 70e0619..9613a54 100644
+--- a/cpp/core/plugin/ncbind.hpp
++++ b/cpp/core/plugin/ncbind.hpp
+@@ -14,6 +14,7 @@
+ #include "ncb_invoke.hpp"
+ #include <map>
+ #include <list>
++#include <set>
+ 
+ inline std::set<ttstr> TVPRegisteredPlugins;
+ 
+diff --git a/cpp/core/sound/WaveIntf.cpp b/cpp/core/sound/WaveIntf.cpp
+index 679ef2e..4fe229b 100644
+--- a/cpp/core/sound/WaveIntf.cpp
++++ b/cpp/core/sound/WaveIntf.cpp
+@@ -19,7 +19,9 @@
+ #include "WaveLoopManager.h"
+ #include "tjsDictionary.h"
+ #include "VorbisWaveDecoder.h"
++#ifndef SHIORIKRKR
+ #include "FFWaveDecoder.h"
++#endif
+ 
+ //---------------------------------------------------------------------------
+ // PCM related constants / definitions
+@@ -713,12 +715,16 @@ struct tTVPWaveDecoderManager {
+     std::vector<tTVPWaveDecoderCreator *> Creators;
+     tTVPWDC_RIFFWave RIFFWaveDecoderCreator;
+     VorbisWaveDecoderCreator vorbisWaveDecoderCreator;
++#ifndef SHIORIKRKR // Shiori: no FFmpeg audio decoding (its FFmpeg has only WMA)
+     FFWaveDecoderCreator ffWaveDecoderCreator;
++#endif
+     OpusWaveDecoderCreator opusWaveDecoderCreator;
+ 
+     tTVPWaveDecoderManager() {
+         TVPWaveDecoderManagerAvail = true;
++#ifndef SHIORIKRKR
+         TVPRegisterWaveDecoderCreator(&ffWaveDecoderCreator);
++#endif
+         TVPRegisterWaveDecoderCreator(&opusWaveDecoderCreator);
+         TVPRegisterWaveDecoderCreator(&RIFFWaveDecoderCreator);
+         TVPRegisterWaveDecoderCreator(&vorbisWaveDecoderCreator);
+diff --git a/cpp/core/sound/win32/WaveImpl.cpp b/cpp/core/sound/win32/WaveImpl.cpp
+index 337d952..c193bec 100644
+--- a/cpp/core/sound/win32/WaveImpl.cpp
++++ b/cpp/core/sound/win32/WaveImpl.cpp
+@@ -1819,7 +1819,7 @@ tTVPWaveSoundBufferDecodeThread::~tTVPWaveSoundBufferDecodeThread() {
+     Running = false;
+     Terminate();
+     Resume();
+-    // Event.Set();
++    Event.Set(); // Shiori: wake it so it sees Terminate (it may sleep without a deadline)
+     WaitFor();
+ }
+ //---------------------------------------------------------------------------
+diff --git a/cpp/core/utils/win32/ThreadImpl.cpp b/cpp/core/utils/win32/ThreadImpl.cpp
+index afc1493..82c3759 100644
+--- a/cpp/core/utils/win32/ThreadImpl.cpp
++++ b/cpp/core/utils/win32/ThreadImpl.cpp
+@@ -39,8 +39,9 @@ tTVPThread::tTVPThread(bool suspended) {
+     Suspended = suspended;
+ 
+     try {
++        // Shiori: kept joinable, so WaitFor really waits for the thread to end (a detached
++        // thread outlived its object, which was then destroyed under it).
+         Handle = std::thread([this] { StartProc(this); });
+-        Handle.detach();
+     } catch(const std::system_error &) {
+         // 捕获线程创建失败异常
+         TVPThrowInternalError;
+@@ -50,14 +51,19 @@ tTVPThread::tTVPThread(bool suspended) {
+ //---------------------------------------------------------------------------
+ tTVPThread::~tTVPThread() {
+     // CloseHandle(Handle);
++    // Shiori: a thread nobody waited for (or one ending itself) is let go.
++    if(Handle.joinable())
++        Handle.detach();
+ }
+ 
+ //---------------------------------------------------------------------------
+ void *tTVPThread::StartProc(void *arg) {
+     auto *_this = (tTVPThread *)arg;
+-    if(_this->Suspended) {
++    {
++        // Shiori: waits for Resume even when it came before this thread got here (that
++        // Resume used to be lost, and the thread never started).
+         std::unique_lock lk(_this->_mutex);
+-        _this->_cond.wait(lk);
++        _this->_cond.wait(lk, [_this] { return !_this->Suspended; });
+     }
+     _this->Execute();
+     TVPOnThreadExited();
+@@ -66,7 +72,7 @@ void *tTVPThread::StartProc(void *arg) {
+ 
+ //---------------------------------------------------------------------------
+ void tTVPThread::WaitFor() {
+-    if(Handle.joinable()) {
++    if(Handle.joinable() && Handle.get_id() != std::this_thread::get_id()) {
+         Handle.join();
+     }
+ }
+@@ -89,7 +95,10 @@ void tTVPThread::SetPriority(tTVPThreadPriority pri) {
+ // }
+ //---------------------------------------------------------------------------
+ void tTVPThread::Resume() {
+-    Suspended = false;
++    {
++        std::lock_guard lk(_mutex);
++        Suspended = false;
++    }
+     _cond.notify_one();
+     // while((tjs_int32)ResumeThread(Handle) > 1) ;
+ }
+@@ -99,7 +108,10 @@ void tTVPThread::Resume() {
+ // tTVPThreadEvent
+ //---------------------------------------------------------------------------
+ void tTVPThreadEvent::Set() {
++    // Shiori: an auto-reset event, as on Windows: a Set with nobody waiting is kept for the
++    // next WaitFor instead of being lost (a lost Set left the timer and sound threads asleep).
+     std::unique_lock lk(Mutex);
++    Signaled = true;
+     Handle.notify_one();
+ }
+ 
+@@ -110,11 +122,14 @@ void tTVPThreadEvent::WaitFor(tjs_uint timeout) {
+     // returns false.
+ 
+     std::unique_lock lk(Mutex);
+-    if(timeout != 0) {
+-        Handle.wait_for(lk, std::chrono::milliseconds(timeout));
++    // (Windows' INFINITE, 0xFFFFFFFF, and other very long waits are waits without a deadline:
++    // a deadline that far ahead overflows the clock.)
++    if(timeout != 0 && timeout < 0x7FFFFFFF) {
++        Handle.wait_for(lk, std::chrono::milliseconds(timeout), [this] { return Signaled; });
+     } else {
+-        Handle.wait(lk);
++        Handle.wait(lk, [this] { return Signaled; });
+     }
++    Signaled = false;
+ }
+ //---------------------------------------------------------------------------
+ 
+diff --git a/cpp/core/utils/win32/ThreadImpl.h b/cpp/core/utils/win32/ThreadImpl.h
+index 10850e9..2ea7786 100644
+--- a/cpp/core/utils/win32/ThreadImpl.h
++++ b/cpp/core/utils/win32/ThreadImpl.h
+@@ -13,6 +13,7 @@
+ 
+ #include "tjsNative.h"
+ #include "ThreadIntf.h"
++#include <atomic>
+ #include <condition_variable>
+ #include <thread>
+ 
+@@ -20,7 +21,8 @@
+ // tTVPThread
+ //---------------------------------------------------------------------------
+ class tTVPThread {
+-    bool Terminated;
++    // Shiori: read and written from two threads.
++    std::atomic<bool> Terminated;
+     std::thread Handle;
+     // DWORD ThreadId;
+     std::mutex _mutex; // for suspend
+@@ -65,6 +67,7 @@ public:
+ class tTVPThreadEvent {
+     std::condition_variable Handle;
+     std::mutex Mutex;
++    bool Signaled = false; // Shiori: latched until a WaitFor takes it
+ 
+ public:
+     void Set();
+diff --git a/cpp/core/visual/FontImpl.cpp b/cpp/core/visual/FontImpl.cpp
+index 514308b..1c3ea09 100644
+--- a/cpp/core/visual/FontImpl.cpp
++++ b/cpp/core/visual/FontImpl.cpp
+@@ -15,7 +15,9 @@
+ #define M_PI 3.14159265358979323846
+ #endif
+ 
++#ifndef SHIORIKRKR
+ #include <cocos/platform/CCFileUtils.h>
++#endif
+ #include "StorageImpl.h"
+ #include "BinaryStream.h"
+ 
+@@ -218,6 +220,7 @@ void TVPInitFontNames() {
+             break;
+ #endif
+ 
++#ifndef SHIORIKRKR // Shiori: the host names the fallback font (default_font)
+         { // from internal storage
+             auto data = cocos2d::FileUtils::getInstance()->getDataFromFile(
+                 "NotoSansCJK-Regular.ttc");
+@@ -238,6 +241,7 @@ void TVPInitFontNames() {
+                    }))
+                 break;
+         }
++#endif
+     } while(false);
+     if(TVPFontNames.GetCount() > 0) {
+         // set default fontface name
+diff --git a/cpp/core/visual/RenderManager.cpp b/cpp/core/visual/RenderManager.cpp
+index 5feb515..cd7cb90 100644
+--- a/cpp/core/visual/RenderManager.cpp
++++ b/cpp/core/visual/RenderManager.cpp
+@@ -31,6 +31,23 @@ extern "C" {
+ // #define USE_SWSCALE
+ #define USE_CV_AFFINE
+ 
++#ifdef SHIORIKRKR
++// Shiori: time spent in the software render manager's operations (the host's profile).
++#include <chrono>
++double TVPShioriRenderSeconds = 0;
++unsigned TVPShioriRenderCalls = 0;
++struct tTVPShioriRenderTimer {
++    std::chrono::steady_clock::time_point Start = std::chrono::steady_clock::now();
++    ~tTVPShioriRenderTimer() {
++        TVPShioriRenderSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
++        ++TVPShioriRenderCalls;
++    }
++};
++#define SHIORI_RENDER_TIMER tTVPShioriRenderTimer shioriRenderTimer;
++#else
++#define SHIORI_RENDER_TIMER
++#endif
++
+ //---------------------------------------------------------------------------
+ // heap allocation functions for bitmap bits
+ //---------------------------------------------------------------------------
+@@ -3109,6 +3126,7 @@ public:
+     void OperateRect(iTVPRenderMethod *method, iTVPTexture2D *tar,
+                      iTVPTexture2D *reftar, const tTVPRect &rctar,
+                      const tRenderTexRectArray &textures) override {
++        SHIORI_RENDER_TIMER
+ #ifdef _DEBUG
+         static bool check = false;
+         cv::Mat _src[3], _tar;
+@@ -3516,6 +3534,7 @@ public:
+                           iTVPTexture2D *target, iTVPTexture2D *reftar,
+                           const tTVPRect &rcclip, const tTVPPointD *pttar,
+                           const tRenderTexQuadArray &textures) override {
++        SHIORI_RENDER_TIMER
+         ++_drawCount;
+         assert(textures.size() == 1);
+         for(int i = 0; i < textures.size(); ++i) {
+@@ -4739,6 +4758,7 @@ public:
+                             const tTVPRect &rcclip,
+                             const tTVPPointD *pttar /*quad*/,
+                             const tRenderTexQuadArray &textures) override {
++        SHIORI_RENDER_TIMER
+         assert(textures.size() == 1);
+         for(int i = 0; i < textures.size(); ++i) {
+             textures[i].first->GetScanLineForRead(
+diff --git a/cpp/core/visual/TransIntf.cpp b/cpp/core/visual/TransIntf.cpp
+index 08e41a6..e3cd07e 100644
+--- a/cpp/core/visual/TransIntf.cpp
++++ b/cpp/core/visual/TransIntf.cpp
+@@ -222,7 +222,7 @@ tjs_error tTVPScanLineProviderForBaseBitmap::GetHeight(/*in*/ tjs_int *height) {
+         *height = Bitmap->GetHeight();
+     return TJS_S_OK;
+ }
+-#if 0
++#ifdef SHIORIKRKR
+ //---------------------------------------------------------------------------
+ tjs_error
+ 	tTVPScanLineProviderForBaseBitmap::GetPixelFormat(/*out*/tjs_int *bpp)
+diff --git a/cpp/core/visual/TransIntf.h b/cpp/core/visual/TransIntf.h
+index 70d2014..9603619 100644
+--- a/cpp/core/visual/TransIntf.h
++++ b/cpp/core/visual/TransIntf.h
+@@ -88,13 +88,13 @@ public:
+ 
+     tjs_error GetWidth(/*in*/ tjs_int *width) override;
+     tjs_error GetHeight(/*in*/ tjs_int *height) override;
+-#if 0
+-	tjs_error GetPixelFormat(/*out*/tjs_int *bpp);
+-	tjs_error GetPitchBytes(/*out*/tjs_int *pitch);
++#ifdef SHIORIKRKR
++	tjs_error GetPixelFormat(/*out*/tjs_int *bpp) override;
++	tjs_error GetPitchBytes(/*out*/tjs_int *pitch) override;
+ 	tjs_error GetScanLine(/*in*/tjs_int line,
+-			/*out*/const void ** scanline);
++			/*out*/const void ** scanline) override;
+ 	tjs_error GetScanLineForWrite(/*in*/tjs_int line,
+-			/*out*/void ** scanline);
++			/*out*/void ** scanline) override;
+ #endif
+     iTVPTexture2D *GetTexture() override;
+     iTVPTexture2D *GetTextureForRender() override;
+diff --git a/cpp/core/visual/impl/WindowImpl.cpp b/cpp/core/visual/impl/WindowImpl.cpp
+index 71acfe0..0e62ed5 100644
+--- a/cpp/core/visual/impl/WindowImpl.cpp
++++ b/cpp/core/visual/impl/WindowImpl.cpp
+@@ -90,9 +90,23 @@ tjs_int TVPGetCursor(const ttstr &name) {
+ 	TVPCursorTable.Add(place, id);
+ 
+ 	return id;
++#endif
++#ifdef SHIORIKRKR
++    // Shiori: cursor files get numbers of their own; the host decodes and draws them.
++    static tjs_int nextCursor = 1000;
++    tjs_int id = nextCursor++;
++    TVPCursorTable.Add(place, id);
++    TVPCursorStorages()[id] = place;
++    return id;
+ #endif
+     return 0;
+ }
++#ifdef SHIORIKRKR
++std::map<tjs_int, ttstr> &TVPCursorStorages() {
++    static std::map<tjs_int, ttstr> storages;
++    return storages;
++}
++#endif
+ //---------------------------------------------------------------------------
+ 
+ #if 0
+diff --git a/cpp/core/visual/impl/WindowImpl.h b/cpp/core/visual/impl/WindowImpl.h
+index 91baa62..8cfb090 100644
+--- a/cpp/core/visual/impl/WindowImpl.h
++++ b/cpp/core/visual/impl/WindowImpl.h
+@@ -95,6 +95,11 @@ mismatch #pragma pack(push, 1) BYTE   dmDeviceName[CCHDEVICENAME];
+ // Mouse Cursor Management
+ //---------------------------------------------------------------------------
+ extern tjs_int TVPGetCursor(const ttstr &name);
++#ifdef SHIORIKRKR
++#include <map>
++// Shiori: cursor numbers given to cursor files, and the files' storage names.
++std::map<tjs_int, ttstr> &TVPCursorStorages();
++#endif
+ //---------------------------------------------------------------------------
+ 
+ //---------------------------------------------------------------------------
+diff --git a/cpp/core/visual/transhandler.h b/cpp/core/visual/transhandler.h
+index 85ec256..d7b3222 100644
+--- a/cpp/core/visual/transhandler.h
++++ b/cpp/core/visual/transhandler.h
+@@ -84,7 +84,7 @@ public:
+     // return image width
+     virtual tjs_error GetHeight(/*out*/ tjs_int *height) = 0;
+     // return image height
+-#if 0
++#ifdef SHIORIKRKR // Shiori: KiriKiri's scanline access, for transition plug-ins
+ 	virtual tjs_error GetPixelFormat(/*out*/tjs_int *bpp) = 0;
+ 		// return image bit depth
+ 	virtual tjs_error GetPitchBytes(/*out*/tjs_int *pitch) = 0;

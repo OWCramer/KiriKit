@@ -21,6 +21,8 @@
 #include "DebugIntf.h"
 
 #include <algorithm>
+#include <chrono>
+extern double ShioriEmoteDrawSeconds;
 #include <cstring>
 #include <map>
 #include <memory>
@@ -337,7 +339,9 @@ public:
         hostCommand(player(), "show");
         int32_t bounds[4] = {0, 0, 0, 0};
         // The host draws R, G, B, A, the order krkr2 keeps layer pixels in.
+        const auto drawStart = std::chrono::steady_clock::now();
         const int drew = host()->draw(host()->context, player(), pixels, w, h, pitch, affine_, bounds);
+        ShioriEmoteDrawSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - drawStart).count();
         static const bool trace = getenv("SHIORIKRKR_TRACE_EMOTE") != nullptr;
         if (trace) {
             char line[256];

@@ -19,6 +19,9 @@
 
 #import <Foundation/Foundation.h>
 #include <mach/mach.h>
+#if TARGET_OS_IPHONE
+#include <os/proc.h>
+#endif
 #include <sys/sysctl.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -57,8 +60,7 @@ void TVPGetMemoryInfo(TVPMemoryInfo &m) {
 
 tjs_int TVPGetSystemFreeMemory() {
 #if TARGET_OS_IPHONE
-    extern size_t os_proc_available_memory(void) __attribute__((weak_import));
-    if (os_proc_available_memory) return tjs_int(os_proc_available_memory() / (1024 * 1024));
+    return tjs_int(os_proc_available_memory() / (1024 * 1024));
 #endif
     vm_statistics64_data_t stats;
     mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;

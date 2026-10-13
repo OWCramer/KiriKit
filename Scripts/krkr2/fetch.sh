@@ -4,11 +4,13 @@
 # https://mozilla.org/MPL/2.0/.
 #
 # Fetches what Shiori's own KiriKiri engine (ShioriKrkr) is built from, into Vendor/
-# (gitignored):
-#   - krkr2 (2468785842/krkr2) at the commit AetherKrkr forked from, with Shiori's changes
-#     (Scripts/krkr2/patches) applied: the engine's core (KiriKiri licence);
-#   - krkrsdl3 at a pinned commit, unpatched: a few plug-ins krkr2 lacks are compiled from it
-#     (KiriKiri licence plus its publish-your-changes term);
+# (gitignored), and applies Shiori's changes (Scripts/krkr2/patches, written back by
+# export-patches.sh):
+#   - krkr2 (2468785842/krkr2) at the commit AetherKrkr forked from: the engine's core
+#     (KiriKiri licence);
+#   - krkrsdl3 at a pinned commit: the few plug-ins with no other source (PackinOne, lzfs,
+#     gfxEffect, LayerExDraw on plutovg; KiriKiri licence plus its publish-your-changes term);
+#   - wamsoft's plug-in repositories (KiriKiri licence), pinned;
 #   - vcpkg, and the dependencies it builds for each slice.
 # Nothing here comes from Vendor/Aether.
 #
@@ -28,24 +30,35 @@ KRKRSDL3_COMMIT=358b0469bd41ffd2fc8cc08bcaa1e205e817aff9   # 2026-09-30
 VCPKG_URL=https://github.com/microsoft/vcpkg
 VCPKG_COMMIT=${VCPKG_COMMIT:-e456309491fd875487bf02b8a0dca76c1b1b00cc}   # 2026-10-10
 
-mkdir -p "$VENDOR"
-if [ ! -d "$VENDOR/krkr2/.git" ]; then
-    git clone "$KRKR2_URL" "$VENDOR/krkr2"
-fi
-git -C "$VENDOR/krkr2" fetch --quiet origin || true
-git -C "$VENDOR/krkr2" checkout --quiet -- .
-git -C "$VENDOR/krkr2" checkout --quiet "$KRKR2_COMMIT"
-for patch in "$HERE"/patches/*.patch; do
-    [ -e "$patch" ] || continue
-    git -C "$VENDOR/krkr2" apply --whitespace=nowarn "$patch"
-done
+checkout() { # dir url commit patch
+    local dir=$1 url=$2 commit=$3 patch=$4
+    if [ ! -d "$dir/.git" ]; then
+        mkdir -p "$dir"
+        git -C "$dir" init -q
+        git -C "$dir" remote add origin "$url"
+    fi
+    git -C "$dir" fetch -q --depth 1 origin "$commit"
+    git -C "$dir" checkout -q -f FETCH_HEAD
+    git -C "$dir" clean -fdq
+    if [ -e "$patch" ]; then git -C "$dir" apply --whitespace=nowarn "$patch"; fi
+}
 
-if [ ! -d "$VENDOR/krkrsdl3/.git" ]; then
-    git clone "$KRKRSDL3_URL" "$VENDOR/krkrsdl3"
-fi
-git -C "$VENDOR/krkrsdl3" fetch --quiet origin || true
-git -C "$VENDOR/krkrsdl3" checkout --quiet -- .
-git -C "$VENDOR/krkrsdl3" checkout --quiet "$KRKRSDL3_COMMIT"
+mkdir -p "$VENDOR"
+checkout "$VENDOR/krkr2" "$KRKR2_URL" "$KRKR2_COMMIT" "$HERE/patches/krkr2/shiori.patch"
+checkout "$VENDOR/krkrsdl3" "$KRKRSDL3_URL" "$KRKRSDL3_COMMIT" "$HERE/patches/krkrsdl3/shiori.patch"
+while read -r repo commit; do
+    [ -n "$repo" ] || continue
+    checkout "$VENDOR/upstream-plugins/$repo" "https://github.com/$repo" "$commit" \
+        "$HERE/patches/wamsoft/$(basename "$repo").patch"
+done <<'PINS'
+wamsoft/AlphaMovie 774002179df78ea447696cf47cde3465690a36bb
+wamsoft/extrans bd0611eced7e2731a8c8403148e06abea827467e
+wamsoft/layerExAreaAverage b04fbd29548e43d76293625e1d06a3141f0853d8
+wamsoft/layerExBTOA a57e7a25a9e079f95b93cf9768949e0f8789f685
+wamsoft/layerExImage c8e9e71f5ce475340732888ddda7270f77e19122
+wamsoft/layerExRaster a4c9be0c7510cca552e27c0c3e931b2eaee399af
+wamsoft/shrinkCopy 007fbba3b3531b476d6b97e7ee80553868f31b2d
+PINS
 
 if [ ! -x "$VENDOR/vcpkg/vcpkg" ]; then
     [ -d "$VENDOR/vcpkg/.git" ] || git clone "$VCPKG_URL" "$VENDOR/vcpkg"

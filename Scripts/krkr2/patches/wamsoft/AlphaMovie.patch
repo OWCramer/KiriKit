@@ -1,0 +1,22 @@
+diff --git a/AlphaMovie.cpp b/AlphaMovie.cpp
+index a108d51..0996fd3 100644
+--- a/AlphaMovie.cpp
++++ b/AlphaMovie.cpp
+@@ -358,7 +358,7 @@ public:
+ 
+ 	//----------------------------------------------------------- ストレージ操作
+ 	void closeStream() {
+-		if (Stream) { Stream->Destruct(); Stream = 0; }
++		if (Stream) { delete Stream; Stream = 0; }
+ 	}
+ 
+ 	// amv を開く
+@@ -530,7 +530,7 @@ private:
+ 	//----------------------------------------------------------- フレーム情報
+ 	struct FrameInfo { tjs_int64 offset; tjs_uint32 number; };
+ 
+-	iTJSBinaryStream *Stream;
++	tTJSBinaryStream *Stream;
+ 	tjs_uint32 NumOfFrame;
+ 	tjs_int64  FirstFrameOfs;
+ 	tjs_uint16 Width, Height;

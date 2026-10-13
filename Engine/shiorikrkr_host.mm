@@ -30,6 +30,7 @@
 #include <spdlog/sinks/base_sink.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <deque>
 #include <functional>
@@ -47,6 +48,9 @@
 extern int _argc;
 extern char **_argv;
 extern bool TVPTerminated;
+extern double TVPShioriRenderSeconds;
+extern unsigned TVPShioriRenderCalls;
+double ShioriEmoteDrawSeconds = 0;
 
 namespace {
 
@@ -303,6 +307,10 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
         next.deliver();
         if (next.button) break;
     }
+    static const bool profile = getenv("SHIORIKRKR_PROFILE") != nullptr;
+    static int profileTicks = 0;
+    static double profileTick = 0, profileWorst = 0;
+    const auto tickStart = std::chrono::steady_clock::now();
     try {
         ::Application->Run();
         iTVPTexture2D::RecycleProcess();
@@ -314,6 +322,24 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
         hostLog("ShioriKrkr: frame threw");
     }
     --h.tickDepth;
+    if (profile) {
+        const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - tickStart).count();
+        profileTick += took;
+        profileWorst = std::max(profileWorst, took);
+        if (++profileTicks == 300) {
+            char line[256];
+            snprintf(line, sizeof line,
+                     "ShioriKrkr profile (300 ticks): tick %.2f ms avg, %.1f ms worst; render ops %.2f ms (%u calls); E-mote %.2f ms",
+                     profileTick * 1000 / 300, profileWorst * 1000, TVPShioriRenderSeconds * 1000 / 300, TVPShioriRenderCalls / 300,
+                     ShioriEmoteDrawSeconds * 1000 / 300);
+            hostLog(line);
+            profileTicks = 0;
+            profileTick = profileWorst = 0;
+            TVPShioriRenderSeconds = 0;
+            TVPShioriRenderCalls = 0;
+            ShioriEmoteDrawSeconds = 0;
+        }
+    }
     if (shiori::exitRequested() || ::Application->IsTarminate()) h.finished = true;
     return h.finished ? 0 : 1;
 }
