@@ -2,9 +2,11 @@
 # If a copy of the MPL was not distributed with this file, You can obtain one at
 # https://mozilla.org/MPL/2.0/.
 #
-# ShioriKrkr: krkrsdl3 (Vendor/krkrsdl3) and Shiori's host glue as one dynamic library that
-# exports only shiorikrkr.h. Built per slice by Scripts/krkrsdl3/build-framework.sh, which
-# passes the vcpkg toolchain and triplet; on macOS it also builds the harness.
+# ShioriKrkr: Shiori's own KiriKiri engine. krkr2's core (Vendor/krkr2 at the commit
+# AetherKrkr forked from, KiriKiri licence) with Shiori's own environment (window, input,
+# audio, Metal compositor, host interface), as one dynamic library that exports only
+# shiorikrkr.h. Built per slice by Scripts/krkr2/build-framework.sh; on macOS it also builds
+# the harness. Which krkr2 files are left out and why: Packages/ShioriKrkrKit/PROVENANCE.md.
 cmake_minimum_required(VERSION 3.28)
 project(ShioriKrkr LANGUAGES C CXX OBJC OBJCXX)
 
@@ -19,8 +21,10 @@ set(CMAKE_OBJCXX_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 
 set(VENDOR "${CMAKE_CURRENT_SOURCE_DIR}/../../../Vendor" CACHE PATH "Shiori's Vendor folder")
-set(KRKRSDL3 "${VENDOR}/krkrsdl3")
-set(KRKRSDL3_BUILD "${VENDOR}/krkrsdl3_build")
+set(KRKR2 "${VENDOR}/krkr2/cpp")
+set(CORE "${KRKR2}/core")
+set(SDL3PLUGINS "${VENDOR}/krkrsdl3/plugins")
+set(HERE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(IOS TRUE)
@@ -28,78 +32,126 @@ else()
     set(MACOS TRUE)
 endif()
 
-# krkrsdl3's own source lists (krkrsdl3_build/cmake/*.txt) name its files relative to their
-# cpp/ submodule; rewrite them to Vendor/krkrsdl3 and read them in.
-set(USE_SDL3 ON)
-set(USE_FFMPEG OFF)
-foreach(list core environ plugins tjs2)
-    file(READ "${KRKRSDL3_BUILD}/cmake/cmake_${list}.txt" text)
-    string(REPLACE "\${CMAKE_CURRENT_SOURCE_DIR}/cpp" "${KRKRSDL3}" text "${text}")
-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/krkrsdl3_${list}.cmake" "${text}")
-    include("${CMAKE_CURRENT_BINARY_DIR}/krkrsdl3_${list}.cmake")
+# ---- TJS2's parsers (bison 3.8) and date word map, generated at configure time ----
+set(GEN "${CMAKE_CURRENT_BINARY_DIR}/gen")
+file(MAKE_DIRECTORY "${GEN}")
+find_program(BISON NAMES bison PATHS /opt/homebrew/opt/bison/bin NO_DEFAULT_PATH)
+if(NOT BISON)
+    find_program(BISON NAMES bison REQUIRED)
+endif()
+set(PARSERS)
+foreach(grammar tjs tjsdate tjspp)
+    add_custom_command(OUTPUT "${GEN}/${grammar}.tab.cpp" "${GEN}/${grammar}.tab.hpp"
+        COMMAND "${BISON}" "${CORE}/tjs2/bison/${grammar}.y"
+        DEPENDS "${CORE}/tjs2/bison/${grammar}.y"
+        WORKING_DIRECTORY "${GEN}")
+    list(APPEND PARSERS "${GEN}/${grammar}.tab.cpp")
 endforeach()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_custom_command(OUTPUT "${GEN}/tjsDateWordMap.inc"
+    COMMAND "${Python3_EXECUTABLE}" -I create_world_map.py "${GEN}/tjsDateWordMap.inc"
+    DEPENDS "${CORE}/tjs2/script/create_world_map.py"
+    WORKING_DIRECTORY "${CORE}/tjs2/script")
 
-set(SOURCES ${KRKRSDL_CORE_SRC} ${KRKRSDL_ENVIRON_SRC} ${KRKRSDL_PLUGINS_SRC} ${KRKRSDL_TJS2_SRC})
-# SDL's main is the host app's, not krkrsdl3's; movies are Shiori's (shiorikrkr_movie.cpp) in
-# place of krkrsdl3's Apple stubs.
-list(REMOVE_ITEM SOURCES "${KRKRSDL3}/environ/sdl3/sdl3_entry.cpp" "${KRKRSDL3}/environ/apple/apple_video.mm")
-# E-mote is Shiori's (shiorikrkr_emote.cpp and the host's renderer): krkrsdl3's emoteplayer and
-# motionplayer plug-ins and its D3DEmotePlayer aren't built (their lineage is unaudited).
-list(FILTER SOURCES EXCLUDE REGEX "/plugins/emoteplayer/")
-list(REMOVE_ITEM SOURCES "${KRKRSDL3}/plugins/DrawDeviceD3D/D3DEmotePlayer.cpp" "${KRKRSDL3}/plugins/motionPlayer.cpp")
-list(APPEND SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_host.mm"
-    "${CMAKE_CURRENT_SOURCE_DIR}/cx_decrypt.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_presenter.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/cursor_decode.mm"
-    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_movie.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/nekoworks.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/getlangname.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_emote.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_motion.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_motionplayer.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/datapack.cpp")
+# ---- krkr2 core ----
+set(TJS2_SOURCES
+    tjsLex tjsNative tjsRandomGenerator tjsDebug tjsRegExp tjsBinarySerializer tjsInterCodeGen
+    tjsObject tjsConstArrayData tjsUtils tjsException tjsDictionary tjsInterCodeExec
+    tjsVariantString tjsScriptBlock tjsMath tjs tjsMessage tjsDisassemble tjsDate tjsError
+    tjsInterface tjsMT19937ar-cok tjsArray tjsByteCodeLoader tjsDateParser tjsGlobalStringMap
+    tjsOctPack tjsNamespace tjsScriptCache tjsConfig tjsCompileControl tjsObjectExtendable
+    tjsVariant tjsString)
+list(TRANSFORM TJS2_SOURCES PREPEND "${CORE}/tjs2/")
+list(TRANSFORM TJS2_SOURCES APPEND ".cpp")
+
+# Left out of base: the 7-Zip, TAR and ZIP archive readers (krkr2's loose-package support;
+# Shiori's games are XP3, and they pull in 7-Zip and libarchive).
+set(BASE_SOURCES
+    BinaryStream CharacterSet EventIntf ScriptMgnIntf StorageIntf SysInitIntf SystemIntf
+    TextStream UtilStreams XP3Archive KAGParser MsgIntf
+    impl/EventImpl impl/FileSelector impl/NativeEventQueue impl/ScriptMgnImpl impl/StorageImpl
+    impl/SysInitImpl impl/SystemImpl impl/MsgImpl)
+list(TRANSFORM BASE_SOURCES PREPEND "${CORE}/base/")
+list(TRANSFORM BASE_SOURCES APPEND ".cpp")
+
+# Left out of visual: the cocos2d-x OpenGL renderer (ogl/), JPEG XR, PVR and BPG loaders.
+set(VISUAL_SOURCES
+    LoadWEBP TransIntf MenuItemIntf SaveTLG5 FontSystem RectItf VideoOvlIntf LayerBitmapIntf
+    FontImpl RenderManager LoadJPEG GraphicsLoaderIntf SaveTLG6 FreeType ImageFunction tvpgl
+    LoadTLG LayerTreeOwnerImpl GraphicsLoadThread LayerManager PrerenderedFont WindowIntf
+    FreeTypeFontRasterizer LoadPNG LayerIntf ComplexRect CharacterData BitmapLayerTreeOwner
+    BitmapIntf argb
+    gl/blend_function gl/ResampleImage gl/WeightFunctor
+    impl/BasicDrawDevice impl/BitmapBitsAlloc impl/BitmapInfomation impl/DInputMgn
+    impl/DrawDevice impl/GraphicsLoaderImpl impl/LayerBitmapImpl impl/LayerImpl
+    impl/MenuItemImpl impl/PassThroughDrawDevice impl/VideoOvlImpl
+    impl/WindowImpl)
+list(TRANSFORM VISUAL_SOURCES PREPEND "${CORE}/visual/")
+list(TRANSFORM VISUAL_SOURCES APPEND ".cpp")
+
+# Left out of sound: WaveMixer (OpenAL/SDL2; Shiori's audio output replaces it).
+set(SOUND_SOURCES
+    CDDAIntf MathAlgorithms MIDIIntf PhaseVocoderDSP PhaseVocoderFilter
+    SoundBufferBaseIntf VorbisWaveDecoder WaveFormatConverter WaveIntf WaveLoopManager
+    WaveSegmentQueue win32/CDDAImpl win32/MIDIImpl win32/SoundBufferBaseImpl win32/tvpsnd
+    win32/WaveImpl)
+list(TRANSFORM SOUND_SOURCES PREPEND "${CORE}/sound/")
+list(TRANSFORM SOUND_SOURCES APPEND ".cpp")
+
+set(UTILS_SOURCES
+    ClipboardIntf.cpp DebugIntf.cpp MathAlgorithms_Default.cpp md5.c MiscUtility.cpp PadIntf.cpp
+    Random.cpp RealFFT_Default.cpp ThreadIntf.cpp TickCount.cpp TimerIntf.cpp VelocityTracker.cpp
+    encoding/gbk2unicode.c encoding/jis2unicode.c win32/ClipboardImpl.cpp win32/DebugImpl.cpp
+    win32/PadImpl.cpp win32/ThreadImpl.cpp win32/TimerImpl.cpp win32/TVPTimer.cpp)
+list(TRANSFORM UTILS_SOURCES PREPEND "${CORE}/utils/")
+
+set(OTHER_CORE_SOURCES
+    "${CORE}/plugin/ncbind.cpp" "${CORE}/plugin/PluginIntf.cpp" "${CORE}/plugin/PluginImpl.cpp"
+    "${CORE}/extension/Extension.cpp"
+    "${CORE}/environ/Application.cpp" "${CORE}/environ/DetectCPU.cpp"
+    "${CORE}/environ/win32/SystemControl.cpp")
+
+# ---- Shiori's environment (replaces krkr2's cocos2d-x one) ----
+file(GLOB SHIORI_ENVIRON_SOURCES CONFIGURE_DEPENDS "${HERE}/environ/*.cpp" "${HERE}/environ/*.mm")
+
+set(SOURCES ${PARSERS} "${GEN}/tjsDateWordMap.inc" ${TJS2_SOURCES} ${BASE_SOURCES} ${VISUAL_SOURCES}
+    ${SOUND_SOURCES} ${UTILS_SOURCES} ${OTHER_CORE_SOURCES} ${SHIORI_ENVIRON_SOURCES})
 
 option(SHIORIKRKR_DEBUG_THROW "Backtrace every C++ throw (SHIORIKRKR_TRACE_THROW=1)" OFF)
 if(SHIORIKRKR_DEBUG_THROW)
-    list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/debug_throw.cpp")
+    list(APPEND SOURCES "${HERE}/debug_throw.cpp")
 endif()
 
 add_library(ShioriKrkr SHARED ${SOURCES})
 set_target_properties(ShioriKrkr PROPERTIES OUTPUT_NAME ShioriKrkr)
 
-target_compile_definitions(ShioriKrkr PRIVATE _KRKRSDL3_USE_SDL3=1 NDEBUG=1 SHIORIKRKR_OWN_EMOTE=1)
+target_compile_definitions(ShioriKrkr PRIVATE NDEBUG=1 TJS_TEXT_OUT_CRLF __STDC_CONSTANT_MACROS
+    USE_UNICODE_FSTRING SHIORIKRKR=1)
 if(IOS)
-    target_compile_definitions(ShioriKrkr PRIVATE _KRKRSDL3_IOS=1)
+    target_compile_definitions(ShioriKrkr PRIVATE SHIORIKRKR_IOS=1)
 else()
-    target_compile_definitions(ShioriKrkr PRIVATE _KRKRSDL3_MACOS=1)
+    target_compile_definitions(ShioriKrkr PRIVATE SHIORIKRKR_MACOS=1 MACOS=1)
 endif()
 # Upstream code is written for warnings-off builds; keep the log readable.
 target_compile_options(ShioriKrkr PRIVATE -w)
-# krkrsdl3's Objective-C++ is manual retain/release; Shiori's is ARC.
-set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_host.mm" "${CMAKE_CURRENT_SOURCE_DIR}/cursor_decode.mm"
-    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+set_source_files_properties(${SHIORI_ENVIRON_SOURCES} PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
 target_include_directories(ShioriKrkr PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../Sources/CShioriKrkr/include"
-    ${KRKRSDL_CORE_PATH}/archive
-    ${KRKRSDL_CORE_PATH}/main
-    ${KRKRSDL_CORE_PATH}/media/font
-    ${KRKRSDL_CORE_PATH}/media/image
-    ${KRKRSDL_CORE_PATH}/media/movie
-    ${KRKRSDL_CORE_PATH}/media/sound
-    ${KRKRSDL_CORE_PATH}/msg
-    ${KRKRSDL_CORE_PATH}/render
-    ${KRKRSDL_CORE_PATH}/script
-    ${KRKRSDL_CORE_PATH}/utils
-    ${KRKRSDL_CORE_PATH}/utils/math
-    ${KRKRSDL_ENVIRON_PATH}
-    ${KRKRSDL_PLUGINS_PATH}
-    ${KRKRSDL_TJS2_PATH})
+    "${HERE}/compat"
+    "${HERE}/environ"
+    "${HERE}/../Sources/CShioriKrkr/include"
+    "${GEN}"
+    "${CORE}" "${CORE}/common" "${CORE}/tjs2"
+    "${CORE}/base" "${CORE}/base/impl"
+    "${CORE}/environ" "${CORE}/environ/win32"
+    "${CORE}/visual" "${CORE}/visual/gl" "${CORE}/visual/impl"
+    "${CORE}/sound" "${CORE}/sound/win32"
+    "${CORE}/utils" "${CORE}/utils/win32"
+    "${CORE}/plugin" "${CORE}/extension"
+    "${KRKR2}/plugins")
 
 find_package(PNG REQUIRED)
 find_package(Freetype REQUIRED)
-find_package(glm CONFIG REQUIRED)
 find_package(JPEG REQUIRED)
 find_package(libjpeg-turbo CONFIG REQUIRED)
 find_package(Vorbis CONFIG REQUIRED)
@@ -107,43 +159,46 @@ find_package(WebP CONFIG REQUIRED)
 find_package(oniguruma CONFIG REQUIRED)
 find_package(Opus CONFIG REQUIRED)
 find_package(OpusFile CONFIG REQUIRED)
-find_package(SDL3 CONFIG REQUIRED)
-find_package(SDL3_ttf CONFIG REQUIRED)
+find_package(fmt CONFIG REQUIRED)
+find_package(spdlog CONFIG REQUIRED)
+find_package(lz4 CONFIG REQUIRED)
+find_package(uchardet CONFIG REQUIRED)
+find_package(xxHash CONFIG REQUIRED)
 find_package(plutovg CONFIG REQUIRED)
 target_link_libraries(ShioriKrkr PRIVATE
-    PNG::PNG Freetype::Freetype glm::glm-header-only JPEG::JPEG
+    PNG::PNG Freetype::Freetype JPEG::JPEG
     $<IF:$<TARGET_EXISTS:libjpeg-turbo::turbojpeg>,libjpeg-turbo::turbojpeg,libjpeg-turbo::turbojpeg-static>
     Vorbis::vorbis Vorbis::vorbisfile Vorbis::vorbisenc
     WebP::webp WebP::webpdecoder WebP::webpdemux
     oniguruma::onig Opus::opus OpusFile::opusfile
-    SDL3::SDL3 SDL3_ttf::SDL3_ttf plutovg::plutovg)
+    fmt::fmt spdlog::spdlog lz4::lz4 uchardet::libuchardet xxHash::xxhash plutovg::plutovg iconv)
 
-# FFmpeg (LGPL-2.1+, the ASF demuxer and WMV 9 / WMA 2 decoders): the app's
-# Vendor/ShioriFFmpeg.xcframework slice on iOS, build/ffmpeg-macos for the harness.
+# FFmpeg (LGPL-2.1+): the app's Vendor/ShioriFFmpeg.xcframework slice on iOS,
+# build/ffmpeg-macos for the harness.
 set(FFMPEG_INCLUDE "" CACHE PATH "FFmpeg headers")
 set(FFMPEG_LIBRARY "" CACHE FILEPATH "FFmpeg static library (libffmpeg.a)")
 target_include_directories(ShioriKrkr PRIVATE "${FFMPEG_INCLUDE}")
 target_link_libraries(ShioriKrkr PRIVATE "${FFMPEG_LIBRARY}")
 
 # Only the C interface leaves the image.
-set(EXPORTS "${CMAKE_CURRENT_SOURCE_DIR}/exports.txt")
+set(EXPORTS "${HERE}/exports.txt")
 target_link_options(ShioriKrkr PRIVATE "LINKER:-exported_symbols_list,${EXPORTS}" "LINKER:-dead_strip")
 
 if(IOS)
     target_link_libraries(ShioriKrkr PRIVATE
         "-framework Foundation" "-framework UIKit" "-framework CoreGraphics" "-framework QuartzCore"
-        "-framework AVFoundation" "-framework AudioToolbox" "-framework GameController" "-framework Metal"
-        "-framework CoreMotion" "-framework CoreHaptics" "-framework CoreBluetooth" "-framework CoreAudio"
-        "-framework UniformTypeIdentifiers" "-framework ImageIO")
+        "-framework AVFoundation" "-framework AudioToolbox" "-framework Metal" "-framework CoreAudio"
+        "-framework CoreText" "-framework ImageIO" "-framework VideoToolbox" "-framework CoreMedia"
+        "-framework CoreVideo")
 else()
     target_link_libraries(ShioriKrkr PRIVATE
         "-framework Foundation" "-framework AppKit" "-framework CoreGraphics" "-framework QuartzCore"
-        "-framework IOKit" "-framework ForceFeedback" "-framework GameController" "-framework AudioToolbox"
-        "-framework Carbon" "-framework Metal" "-framework CoreAudio" "-framework CoreHaptics"
-        "-framework UniformTypeIdentifiers" "-framework AVFoundation" "-framework ImageIO")
-    # The Mac harness: runs a game headless-ish (a window, no app), taps and captures.
-    add_executable(shiorikrkr-harness "${CMAKE_CURRENT_SOURCE_DIR}/harness/main.mm")
-    target_include_directories(shiorikrkr-harness PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../Sources/CShioriKrkr/include")
+        "-framework AudioToolbox" "-framework Metal" "-framework CoreAudio" "-framework CoreText"
+        "-framework AVFoundation" "-framework ImageIO" "-framework VideoToolbox" "-framework CoreMedia"
+        "-framework CoreVideo" "-framework Security")
+    add_executable(shiorikrkr-harness "${HERE}/harness/main.mm")
+    target_include_directories(shiorikrkr-harness PRIVATE "${HERE}/../Sources/CShioriKrkr/include")
     target_compile_options(shiorikrkr-harness PRIVATE -fobjc-arc)
-    target_link_libraries(shiorikrkr-harness PRIVATE ShioriKrkr "-framework Foundation" "-framework AppKit")
+    target_link_libraries(shiorikrkr-harness PRIVATE ShioriKrkr "-framework Foundation" "-framework AppKit"
+        "-framework Metal" "-framework QuartzCore")
 endif()
