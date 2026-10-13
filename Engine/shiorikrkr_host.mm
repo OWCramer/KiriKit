@@ -25,6 +25,7 @@
 #include "nekoworks.h"
 #include "cursor_decode.h"
 #include "shiorikrkr_emote.h"
+#include "render/shiori_metal_render.h"
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/base_sink.h>
@@ -48,6 +49,7 @@
 extern int _argc;
 extern char **_argv;
 extern bool TVPTerminated;
+static double profileFrameWait = 0; // seconds frame() waited for the GPU since the last profile line
 extern double TVPShioriRenderSeconds;
 extern unsigned TVPShioriRenderCalls;
 double ShioriEmoteDrawSeconds = 0;
@@ -80,6 +82,11 @@ struct Host {
     std::deque<PendingInput> input;
     // The frame handed out last.
     std::vector<uint8_t> frameCopy;
+    // The host presents frames (as Metal textures, when the engine composes on the GPU).
+    bool presents = false;
+    // Some frame had something on it (no more looking for blank ones).
+    bool sawContent = false;
+    uint64_t presentedSerial = 0;
 };
 
 Host &host() {
@@ -187,6 +194,9 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
     if (!config || config->struct_size < offsetof(shiorikrkr_config_t, emote) || !config->game_root)
         return SHIORIKRKR_ERROR_ARGUMENTS;
     h.log = config->log;
+    h.presents = config->host_presents != 0;
+    h.sawContent = false;
+    h.presentedSerial = 0;
     h.logContext = config->log_context;
     h.message = config->message;
     h.messageContext = config->message_context;
@@ -218,7 +228,9 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
 
     // Options: "-key=value" become engine settings (renderer, default_font ...).
     shiori::clearConfigValues();
-    shiori::setConfigValue("renderer", "software");
+    // Shiori's Metal compositor; SHIORIKRKR_RENDERER=software for krkr2's own (comparisons).
+    const char *renderer = getenv("SHIORIKRKR_RENDERER");
+    shiori::setConfigValue("renderer", renderer && *renderer ? renderer : "metal");
     for (uint32_t i = 0; i < config->argument_count; ++i) {
         if (!config->arguments || !config->arguments[i]) continue;
         std::string option = config->arguments[i];
@@ -314,6 +326,7 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
     try {
         ::Application->Run();
         iTVPTexture2D::RecycleProcess();
+        shiori::metal::flush();
     } catch (const TJS::eTJS &e) {
         hostLog("ShioriKrkr: frame threw: " + e.GetMessage().AsStdString());
     } catch (const std::exception &e) {
@@ -333,6 +346,10 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
                      profileTick * 1000 / 300, profileWorst * 1000, TVPShioriRenderSeconds * 1000 / 300, TVPShioriRenderCalls / 300,
                      ShioriEmoteDrawSeconds * 1000 / 300);
             hostLog(line);
+            const std::string metal = shiori::metal::profileReport(300);
+            if (!metal.empty()) hostLog(std::string("ShioriKrkr profile: frame wait ") +
+                                        std::to_string(profileFrameWait * 1000 / 300).substr(0, 5) + " ms; " + metal);
+            profileFrameWait = 0;
             profileTicks = 0;
             profileTick = profileWorst = 0;
             TVPShioriRenderSeconds = 0;
@@ -352,8 +369,6 @@ SHIORIKRKR_EXPORT int shiorikrkr_frame(shiorikrkr_frame_t *frame) {
     shiori::WindowLayer *window = shiori::activeWindowLayer();
     iTVPTexture2D *texture = shiori::windowTexture(window);
     if (!texture) return 0;
-    const uint8_t *pixels = static_cast<const uint8_t *>(texture->GetScanLineForRead(0));
-    if (!pixels) return 0;
     int w = 0, hgt = 0;
     shiori::windowCanvasSize(window, w, hgt);
     if (w <= 0 || hgt <= 0) {
@@ -362,26 +377,47 @@ SHIORIKRKR_EXPORT int shiorikrkr_frame(shiorikrkr_frame_t *frame) {
     }
     w = std::min<int>(w, int(texture->GetWidth()));
     hgt = std::min<int>(hgt, int(texture->GetHeight()));
-    frame->pixels = pixels;
+    *frame = shiorikrkr_frame_t{};
     frame->width = w;
     frame->height = hgt;
-    frame->pitch = texture->GetPitch();
     frame->serial = shiori::windowFrameSerial(window);
     frame->format = SHIORIKRKR_FRAME_RGBA; // krkr2 keeps pixels as R, G, B, A in memory
-    frame->texture = nullptr;
-    // A coarse look for anything not black: the host lifts its launch cover on the first such
-    // frame (the game's first frames are black while its title loads).
-    bool blank = true;
-    for (int sy = 1; sy < 16 && blank; ++sy)
-        for (int sx = 1; sx < 16; ++sx) {
-            const uint8_t *p = pixels + size_t(sy * hgt / 16) * frame->pitch + size_t(sx * w / 16) * 4;
-            if (p[0] > 8 || p[1] > 8 || p[2] > 8) {
-                blank = false;
-                break;
+    frame->blank = 0;
+
+    // A coarse look for anything not black, until there is some: the host lifts its launch
+    // cover on the first such frame (the game's first frames are black while its title loads).
+    if (!h.sawContent) {
+        const auto *pixels = static_cast<const uint8_t *>(texture->GetScanLineForRead(0));
+        const int pitch = texture->GetPitch();
+        bool blank = true;
+        for (int sy = 1; sy < 16 && blank; ++sy)
+            for (int sx = 1; sx < 16; ++sx) {
+                const uint8_t *p = pixels + size_t(sy * hgt / 16) * pitch + size_t(sx * w / 16) * 4;
+                if (p[0] > 8 || p[1] > 8 || p[2] > 8) {
+                    blank = false;
+                    break;
+                }
             }
-        }
-    frame->blank = blank ? 1 : 0;
-    return 1;
+        frame->blank = blank ? 1 : 0;
+        h.sawContent = !blank;
+    }
+
+    // Composed on the GPU: a texture the host's GPU work waits for, no wait here.
+    shiori::metal::PresentedFrame presented;
+    if (h.presents &&
+        shiori::metal::presentFrame(texture, w, hgt, frame->serial != h.presentedSerial, presented)) {
+        h.presentedSerial = frame->serial;
+        frame->texture = presented.texture;
+        frame->event = presented.event;
+        frame->event_value = presented.value;
+        return 1;
+    }
+
+    const auto waitStart = std::chrono::steady_clock::now();
+    frame->pixels = static_cast<const uint8_t *>(texture->GetScanLineForRead(0));
+    profileFrameWait += std::chrono::duration<double>(std::chrono::steady_clock::now() - waitStart).count();
+    frame->pitch = texture->GetPitch();
+    return frame->pixels ? 1 : 0;
 }
 
 SHIORIKRKR_EXPORT uint32_t shiorikrkr_cursor(const uint8_t **rgba, int32_t *width, int32_t *height,

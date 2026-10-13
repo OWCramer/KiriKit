@@ -155,7 +155,8 @@ shiori_plugin(layerExDraw layerExDraw.dll "${SDL3PLUGINS}/LayerExDraw" LayerExDr
 # ---- Shiori's environment (replaces krkr2's cocos2d-x one) ----
 file(GLOB SHIORI_ENVIRON_SOURCES CONFIGURE_DEPENDS "${HERE}/environ/*.cpp" "${HERE}/environ/*.mm")
 
-set(SHIORI_SOURCES "${HERE}/shiorikrkr_host.mm" "${HERE}/cx_decrypt.cpp" "${HERE}/nekoworks.cpp" "${HERE}/cursor_decode.mm")
+set(SHIORI_SOURCES "${HERE}/shiorikrkr_host.mm" "${HERE}/cx_decrypt.cpp" "${HERE}/nekoworks.cpp" "${HERE}/cursor_decode.mm"
+    "${HERE}/render/shiori_metal_render.mm")
 set(SOURCES ${SHIORI_SOURCES} ${PARSERS} "${GEN}/tjsDateWordMap.inc" ${TJS2_SOURCES} ${BASE_SOURCES} ${VISUAL_SOURCES}
     ${SOUND_SOURCES} ${UTILS_SOURCES} ${OTHER_CORE_SOURCES} ${SHIORI_ENVIRON_SOURCES}
     ${KRKR2_PLUGIN_SOURCES} ${PLUGIN_SOURCES} "${HERE}/getlangname.cpp" "${HERE}/shiori_plugin_links.cpp"
@@ -179,7 +180,8 @@ else()
 endif()
 # Upstream code is written for warnings-off builds; keep the log readable.
 target_compile_options(ShioriKrkr PRIVATE -w)
-set_source_files_properties(${SHIORI_ENVIRON_SOURCES} "${HERE}/shiorikrkr_host.mm" "${HERE}/cursor_decode.mm" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+set_source_files_properties(${SHIORI_ENVIRON_SOURCES} "${HERE}/shiorikrkr_host.mm" "${HERE}/cursor_decode.mm"
+    "${HERE}/render/shiori_metal_render.mm" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
 target_include_directories(ShioriKrkr PRIVATE
     "${HERE}/compat" "${HERE}/compat/plugins"

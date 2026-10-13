@@ -118,12 +118,13 @@ int shiorikrkr_tick(void);
 void *shiorikrkr_take_view(void);
 
 /* The game's composed frame, for the host to present, top row first: pixels in format (RGBA8
- * or BGRA8; alpha is meaningless, the frame is opaque), or, when texture is set, an
- * id<MTLTexture> (BGRA8, on the engine's Metal device, finished by the engine's command queue
- * before any later work on that queue) whose top-left width x height is the frame. Both stay
- * valid until the next tick. serial changes when the frame does; blank is set while every
- * sampled pixel is black (the game's first frames, before its title draws). Returns 1 when
- * there is a frame. */
+ * or BGRA8; alpha is meaningless, the frame is opaque), or, when texture is set (the host
+ * presents and the engine composes on the GPU), an id<MTLTexture> (RGBA8, on the system's
+ * default Metal device) whose top-left width x height is the frame, ready once event (an
+ * id<MTLSharedEvent>) reaches event_value: the host's GPU work waits for that before reading
+ * it, and pixels is NULL. Both stay valid until the next tick. serial changes when the frame
+ * does; blank is set while every sampled pixel is black (the game's first frames, before its
+ * title draws). Returns 1 when there is a frame. */
 enum { SHIORIKRKR_FRAME_RGBA = 0, SHIORIKRKR_FRAME_BGRA = 1 };
 typedef struct shiorikrkr_frame {
     const uint8_t *pixels;
@@ -133,6 +134,8 @@ typedef struct shiorikrkr_frame {
     /* Since API version 4. */
     int32_t format;
     void *texture;
+    void *event;
+    uint64_t event_value;
 } shiorikrkr_frame_t;
 int shiorikrkr_frame(shiorikrkr_frame_t *frame);
 

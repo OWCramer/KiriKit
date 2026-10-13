@@ -72,15 +72,11 @@ static void writePNG(const std::string &path, const shiorikrkr_frame_t &frame) {
     std::vector<uint8_t> rgba(size_t(frame.width) * frame.height * 4);
     if (frame.texture) {
         id<MTLTexture> texture = (__bridge id<MTLTexture>)frame.texture;
-        std::vector<uint8_t> bgra(rgba.size());
-        [texture getBytes:bgra.data() bytesPerRow:size_t(frame.width) * 4
+        id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)frame.event;
+        if (event) [event waitUntilSignaledValue:frame.event_value timeoutMS:5000];
+        [texture getBytes:rgba.data() bytesPerRow:size_t(frame.width) * 4
                fromRegion:MTLRegionMake2D(0, 0, frame.width, frame.height) mipmapLevel:0];
-        for (size_t i = 0; i < rgba.size(); i += 4) {
-            rgba[i] = bgra[i + 2];
-            rgba[i + 1] = bgra[i + 1];
-            rgba[i + 2] = bgra[i];
-            rgba[i + 3] = 255;
-        }
+        for (size_t i = 3; i < rgba.size(); i += 4) rgba[i] = 255;
     } else {
         for (int y = 0; y < frame.height; ++y)
             for (int x = 0; x < frame.width; ++x) {
@@ -211,6 +207,11 @@ int main(int argc, char **argv) {
         for (; frame < frames; ++frame) {
             const auto tickStart = std::chrono::steady_clock::now();
             const int running = shiorikrkr_tick();
+            if (present) {
+                // As the app does after each tick: take the frame (waits for the GPU's work).
+                shiorikrkr_frame_t taken = {};
+                shiorikrkr_frame(&taken);
+            }
             const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - tickStart).count();
             tickSeconds += took;
             slowest = std::max(slowest, took);
