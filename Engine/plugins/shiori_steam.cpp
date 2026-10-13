@@ -3,10 +3,11 @@
  * https://mozilla.org/MPL/2.0/. */
 
 // krkrsteam.dll: the `Steam` class Steam editions of KiriKiri games link. On the phone there is
-// no Steam client beside the game, so it answers what the games ask at start-up: the game's
-// language (Steam's names, from the device's preferred language), no achievements reached and
-// Steam Cloud off. The games then pick their first language as they do on Steam (NEKOPARA
-// Extra opened its language screen in Japanese without it).
+// no Steam client beside the game, so it answers what the games ask: the game's language
+// (Steam's names, from the device's preferred language), no achievements reached and Steam
+// Cloud off. (NEKO WORKs' scripts link it only when run with -steam=yes, which Shiori doesn't
+// pass: their Steam path adds a handler that redraws every frame and changes nothing visible,
+// and without it they ask getLangName.dll for the language.)
 //
 // Members are the ones the games' own scripts call (NEKOPARA's custom.tjs and steam.tjs):
 // getLanguage(), setAchievement(name), clearAchievement(name), getAchievement(name),

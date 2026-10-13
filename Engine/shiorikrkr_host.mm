@@ -55,10 +55,6 @@ void TVPShioriPrepareRestart();
 static unsigned sessionCount = 0;
 unsigned shiorikrkr::sessionGeneration() { return sessionCount; }
 
-// The options a game's executable carries (System.getArgument): Shiori's games are Steam
-// editions, which run with -steam=yes (NEKOPARA then loads steam.tjs and asks krkrsteam.dll for
-// the language, rather than starting in Japanese).
-std::vector<std::string> TVPShioriEmbeddedOptions() { return {"steam=yes"}; }
 void TVPClearScnearioCache();            // krkr2's KAGParser (sic)
 void TVPShioriKAGExClearScenarioCache(); // KAGParserEx's, under Shiori's name
 static double profileFrameWait = 0; // seconds frame() waited for the GPU since the last profile line

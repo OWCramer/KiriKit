@@ -497,28 +497,10 @@ index 966d7b9..c36d2c3 100644
  }
  //---------------------------------------------------------------------------
 diff --git a/cpp/core/base/impl/SysInitImpl.cpp b/cpp/core/base/impl/SysInitImpl.cpp
-index 9875592..cbae1ad 100644
+index 9875592..9caba7f 100644
 --- a/cpp/core/base/impl/SysInitImpl.cpp
 +++ b/cpp/core/base/impl/SysInitImpl.cpp
-@@ -418,7 +418,17 @@ void TVPMainWindowClosed() {
- //---------------------------------------------------------------------------
- // GetCommandLine
- //---------------------------------------------------------------------------
-+#ifdef SHIORIKRKR
-+// Shiori: options the host gives the game ("name=value"), as a Windows executable carries its
-+// own embedded: the Steam editions' "steam=yes".
-+extern std::vector<std::string> TVPShioriEmbeddedOptions();
-+static std::vector<std::string> *TVPGetEmbeddedOptions() {
-+    auto options = TVPShioriEmbeddedOptions();
-+    return options.empty() ? nullptr : new std::vector<std::string>(std::move(options));
-+}
-+#else
- static std::vector<std::string> *TVPGetEmbeddedOptions() { return nullptr; }
-+#endif
- 
- //---------------------------------------------------------------------------
- static std::vector<std::string> *
-@@ -458,6 +468,15 @@ static bool TVPProgramArgumentsInit = false;
+@@ -458,6 +458,15 @@ static bool TVPProgramArgumentsInit = false;
  static tjs_int TVPCommandLineArgumentGeneration = 0;
  static bool TVPDataPathDirectoryEnsured = false;
  
