@@ -101,7 +101,22 @@ public:
     void setDefault(tTJSVariant v) {
         iTJSDispatch2 *d = v.AsObjectNoAddRef();
         if (!d) return;
+        if (traceText()) {
+            std::string seen;
+            for (const tjs_char *k : {TJS_W("fontsize"), TJS_W("fontSize"), TJS_W("size"), TJS_W("align"), TJS_W("valign"),
+                                      TJS_W("lineSpacing"), TJS_W("linespacing"), TJS_W("face"), TJS_W("rubySize"), TJS_W("rubysize"),
+                                      TJS_W("rubyOffset"), TJS_W("rubyoffset"), TJS_W("lineSize"), TJS_W("pitch"), TJS_W("height"),
+                                      TJS_W("offset"), TJS_W("y"), TJS_W("top"), TJS_W("shadow"), TJS_W("edge")}) {
+                tTJSVariant x;
+                if (has(d, k, x)) seen += ttstr(k).AsStdString() + "=" + ttstr(x).AsStdString() + " ";
+            }
+            fprintf(stderr, "textrender setDefault: %s\n", seen.c_str());
+        }
         readStyle(d, default_);
+    }
+    static bool traceText() {
+        static const bool on = getenv("SHIORIKRKR_TRACE_TEXT") != nullptr;
+        return on;
     }
 
     void setOption(tTJSVariant v) {
@@ -172,6 +187,13 @@ public:
     void done() {
         flushLine();
         placeVertically();
+        if (traceText() && !chars_.empty()) {
+            std::string text;
+            for (const Char &c : chars_) text += ttstr(c.text.c_str()).AsStdString();
+            fprintf(stderr, "textrender done: box %dx%d size %d valign %d: '%s' first y %.1f size %d, bounds %d,%d-%d,%d\n",
+                    int(boxWidth_), int(boxHeight_), int(default_.fontSize), int(default_.valign), text.substr(0, 40).c_str(),
+                    chars_[0].y, int(chars_[0].size), bounds(0), bounds(1), bounds(2), bounds(3));
+        }
     }
 
     void newline() {
@@ -356,6 +378,11 @@ private:
         if (has(d, TJS_W("italic"), x)) s.italic = x.operator bool();
         if (has(d, TJS_W("face"), x)) s.face = str(x);
         if (has(d, TJS_W("fontSize"), x)) s.fontSize = tjs_int(x.AsInteger());
+        // The spellings some games' scripts use (Ninja Girl's choices: fontsize, align, valign).
+        if (has(d, TJS_W("fontsize"), x)) s.fontSize = tjs_int(x.AsInteger());
+        if (has(d, TJS_W("rubysize"), x)) s.rubySize = tjs_int(x.AsInteger());
+        if (has(d, TJS_W("rubyoffset"), x)) s.rubyOffset = tjs_int(x.AsInteger());
+        if (has(d, TJS_W("linespacing"), x)) s.lineSpacing = tjs_int(x.AsInteger());
         if (has(d, TJS_W("chColor"), x)) s.chColor = tjs_uint32(x.AsInteger());
         if (has(d, TJS_W("rubySize"), x)) s.rubySize = tjs_int(x.AsInteger());
         if (has(d, TJS_W("rubyOffset"), x)) s.rubyOffset = tjs_int(x.AsInteger());
