@@ -10,12 +10,13 @@
 
 bool onV2Link_extrans();
 bool onV2Unlink_extrans();
+void shioriLinkKAGParserEx();
 
 namespace {
 
 void linkExtrans() { onV2Link_extrans(); }
 void unlinkExtrans() { onV2Unlink_extrans(); }
-void linkKAGParserEx() {}
+void linkKAGParserEx() { shioriLinkKAGParserEx(); }
 
 } // namespace
 

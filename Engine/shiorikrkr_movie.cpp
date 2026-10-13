@@ -2,10 +2,12 @@
  * If a copy of the MPL was not distributed with this file, You can obtain one at
  * https://mozilla.org/MPL/2.0/. */
 
-// Movie playback for ShioriKrkr: krkrsdl3's PlatformVideo.h players, on FFmpeg (LGPL).
-// A decoder thread reads the movie from the game's archive through a custom AVIOContext (so
-// a 280 MB opening is never loaded at once), turns WMV 9 frames into RGBA and feeds WMA audio
-// to an SDL audio stream; the engine's continuous event shows each frame when its time comes.
+// Movie playback for ShioriKrkr: KiriKiri's video overlay objects (krmovie.h's
+// iTVPVideoOverlay, which krkr2's VideoOverlay class drives), on FFmpeg (LGPL). A decoder
+// thread reads the movie from the game's archive through a custom AVIOContext (so a 280 MB
+// opening is never loaded at once), turns WMV 9 frames into RGBA and feeds WMA audio to one of
+// the engine's own sound streams; the engine's continuous event shows each frame when its time
+// comes, and the VideoOverlay hears of new frames and the end through its event queue.
 //
 // Overlay mode (KAG's default [video]): the frame goes to the host, which draws it over the
 // game (shiorikrkr_frame). Layer mode: the frame is copied into the engine's two video
@@ -22,13 +24,17 @@
 #include <thread>
 
 #include "tjsCommHead.h"
-#include "LayerBitmap.h"
-#include "PlatformVideo.h"
-#include "TVPDebug.h"
-#include "TVPEvent.h"
-#include "WindowManager.h"
-
-#include <SDL3/SDL.h>
+#include "DebugIntf.h"
+#include "MsgIntf.h"
+#include "EventIntf.h"
+#include "LayerBitmapIntf.h"
+#include "StorageIntf.h"
+#include "WaveIntf.h"
+#include "WaveMixer.h"
+#include "WindowImpl.h"
+#include "impl/VideoOvlImpl.h"
+#include "krmovie.h"
+#include "NativeEventQueue.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -85,14 +91,14 @@ struct DecodedFrame {
 
 class MovieCore {
 public:
-    MovieCore(TVPVideoEventCallback callback, void *context, bool layer)
-        : callback_(callback), context_(context), layer_(layer) {}
+    MovieCore(tTJSNI_VideoOverlay *owner, bool layer) : owner_(owner), layer_(layer) {}
 
     ~MovieCore() {
         quit_ = true;
         wake_.notify_all();
         if (thread_.joinable()) thread_.join();
-        if (audio_) SDL_DestroyAudioStream(audio_);
+        hideOverlay();
+        if (audio_) audio_->Release();
         if (video_) avcodec_free_context(&video_);
         if (sound_) avcodec_free_context(&sound_);
         if (format_) avformat_close_input(&format_);
@@ -126,11 +132,17 @@ public:
         fps_ = rate.num > 0 && rate.den > 0 ? av_q2d(rate) : 30.0;
         durationMs_ = format_->duration > 0 ? format_->duration / 1000 : 0;
         if (sound_) {
-            SDL_AudioSpec spec{SDL_AUDIO_F32, sound_->ch_layout.nb_channels, sound_->sample_rate};
-            audio_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
-            audioChannels_ = spec.channels;
+            tTVPWaveFormat format = {};
+            format.SamplesPerSec = tjs_uint(sound_->sample_rate);
+            format.Channels = tjs_uint(std::max(1, sound_->ch_layout.nb_channels));
+            format.BitsPerSample = 32;
+            format.BytesPerSample = 4;
+            format.IsFloat = true;
+            audioChannels_ = int(format.Channels);
+            audio_ = TVPCreateSoundBuffer(format, 1 << 20);
+            setVolume(volume_);
         }
-        TVPAddLog(ttstr("(info) ShioriKrkr movie: ") + ttstr(name_) + ttstr(" ") + ttstr((tjs_int)width_) + ttstr("x") +
+        TVPAddLog(ttstr(TJS_W("(info) ShioriKrkr movie: ")) + ttstr(name_) + ttstr(" ") + ttstr((tjs_int)width_) + ttstr("x") +
                   ttstr((tjs_int)height_) + (sound_ ? ttstr(" with sound") : ttstr("")));
         thread_ = std::thread([this] { decodeLoop(); });
         return true;
@@ -147,7 +159,7 @@ public:
             startedAt_ = Clock::now() - std::chrono::milliseconds(positionMs_);
             playing_ = true;
             paused_ = false;
-            if (audio_) SDL_ResumeAudioStreamDevice(audio_);
+            if (audio_) audio_->Play();
         }
         wake_.notify_all();
     }
@@ -156,7 +168,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         playing_ = false;
         paused_ = false;
-        if (audio_) SDL_PauseAudioStreamDevice(audio_);
+        if (audio_) audio_->Pause();
         requestSeek(0);
         hideOverlay();
     }
@@ -166,7 +178,7 @@ public:
         if (!playing_ || paused_) return;
         positionMs_ = elapsedLocked();
         paused_ = true;
-        if (audio_) SDL_PauseAudioStreamDevice(audio_);
+        if (audio_) audio_->Pause();
     }
 
     void seek(int64_t ms) {
@@ -191,7 +203,7 @@ public:
     void setVolume(long volume) {
         // KiriKiri's 0...100000 (or a percentage).
         const float gain = volume > 100 ? volume / 100000.0f : volume / 100.0f;
-        if (audio_) SDL_SetAudioStreamGain(audio_, std::clamp(gain, 0.0f, 1.0f));
+        if (audio_) audio_->SetVolume(std::clamp(gain, 0.0f, 1.0f));
         volume_ = volume;
     }
 
@@ -204,7 +216,7 @@ public:
         }
         left_ = l, top_ = t, right_ = r, bottom_ = b;
         std::lock_guard<std::mutex> lock(movieOverlayLock());
-        if (auto *overlay = movieOverlay(); overlay && owner_ == this) {
+        if (auto *overlay = movieOverlay(); overlay && drawn_ == this) {
             overlay->left = l, overlay->top = t, overlay->right = r, overlay->bottom = b;
             overlay->serial++;
         }
@@ -213,7 +225,7 @@ public:
     void setVisible(bool visible) {
         visible_ = visible;
         std::lock_guard<std::mutex> lock(movieOverlayLock());
-        if (auto *overlay = movieOverlay(); overlay && owner_ == this) {
+        if (auto *overlay = movieOverlay(); overlay && drawn_ == this) {
             overlay->visible = visible;
             overlay->serial++;
         }
@@ -247,7 +259,7 @@ public:
             } else {
                 publishOverlay(*show);
             }
-            if (layer_ && callback_) callback_(context_, WM_GRAPHNOTIFY, EC_UPDATE, uintptr_t(frameIndex_));
+            if (layer_) post(EC_UPDATE, frameIndex_);
         }
         if (done && !completeSent_) {
             completeSent_ = true;
@@ -256,8 +268,8 @@ public:
                 ended_ = true;
                 playing_ = false;
             }
-            if (audio_) SDL_PauseAudioStreamDevice(audio_);
-            if (callback_) callback_(context_, WM_GRAPHNOTIFY, EC_COMPLETE, 0);
+            if (audio_) audio_->Pause();
+            post(EC_COMPLETE, 0);
         }
     }
 
@@ -266,8 +278,11 @@ public:
         std::lock_guard<std::mutex> lock(frameMutex_);
         if (!current_ || !buffers_[0]) return buffers_[front_];
         front_ = buffers_[1] ? 1 - front_ : 0;
-        buffers_[front_]->Update(current_->pixels.data(), unsigned(width_ * 4), 0, 0, width_, height_);
-        return buffers_[front_];
+        tTVPBaseTexture *target = buffers_[front_];
+        const int w = std::min<int>(width_, int(target->GetWidth())), h = std::min<int>(height_, int(target->GetHeight()));
+        for (int y = 0; y < h; ++y)
+            memcpy(target->GetScanLineForWrite(y), current_->pixels.data() + size_t(y) * width_ * 4, size_t(w) * 4);
+        return target;
     }
 
     void setBuffers(tTVPBaseTexture *a, tTVPBaseTexture *b) {
@@ -283,6 +298,13 @@ public:
     long volume_ = 100000;
 
 private:
+    void post(long code, int frame) {
+        NativeEvent ev(WM_GRAPHNOTIFY);
+        ev.WParam = code;
+        ev.LParam = frame;
+        if (owner_) owner_->PostEvent(ev);
+    }
+
     bool fail(const char *why) {
         TVPAddLog(ttstr("(warn) ShioriKrkr movie: ") + ttstr(name_) + ttstr(": ") + ttstr(why));
         return false;
@@ -331,9 +353,9 @@ private:
 
     void hideOverlay() {
         std::lock_guard<std::mutex> lock(movieOverlayLock());
-        if (owner_ == this) {
+        if (drawn_ == this) {
             overlaySlot().reset();
-            owner_ = nullptr;
+            drawn_ = nullptr;
         }
     }
 
@@ -341,7 +363,7 @@ private:
         std::lock_guard<std::mutex> lock(movieOverlayLock());
         auto &slot = overlaySlot();
         if (!slot) slot = std::make_unique<MovieOverlayFrame>();
-        owner_ = this;
+        drawn_ = this;
         slot->rgba = frame.pixels;
         slot->width = width_;
         slot->height = height_;
@@ -370,13 +392,12 @@ private:
                         std::lock_guard<std::mutex> q(queueMutex_);
                         queue_.clear();
                     }
-                    if (audio_) SDL_ClearAudioStream(audio_);
+                    if (audio_) audio_->Reset();
                     skipBeforeMs_ = target;
                     continue;
                 }
                 // Enough decoded ahead (frames waiting, a second of sound queued): wait.
-                const bool full = queueSize() >= 6 ||
-                                  (audio_ && SDL_GetAudioStreamQueued(audio_) > int(sound_->sample_rate * audioChannels_ * 4));
+                const bool full = queueSize() >= 6 || (audio_ && audio_->GetLatencySamples() > tjs_uint(sound_->sample_rate));
                 if (decodeDone_ || full) {
                     wake_.wait_for(lock, std::chrono::milliseconds(full ? 4 : 50));
                     continue;
@@ -451,14 +472,13 @@ private:
                         }
                         interleaved[size_t(i) * channels + c] = v;
                     }
-                SDL_PutAudioStreamData(audio_, interleaved.data(), int(interleaved.size() * sizeof(float)));
+                audio_->AppendBuffer(interleaved.data(), unsigned(interleaved.size() * sizeof(float)));
             }
             av_frame_unref(frame);
         }
     }
 
-    TVPVideoEventCallback callback_;
-    void *context_;
+    tTJSNI_VideoOverlay *owner_;
     bool layer_;
     tTJSBinaryStream *stream_ = nullptr;
     std::string name_;
@@ -466,7 +486,7 @@ private:
     AVFormatContext *format_ = nullptr;
     AVCodecContext *video_ = nullptr, *sound_ = nullptr;
     int videoIndex_ = -1, audioIndex_ = -1, audioChannels_ = 2;
-    SDL_AudioStream *audio_ = nullptr;
+    iTVPSoundBuffer *audio_ = nullptr;
     std::thread thread_;
     std::atomic<bool> quit_{false};
 
@@ -487,17 +507,20 @@ private:
 
     int left_ = 0, top_ = 0, right_ = 0, bottom_ = 0;
     bool visible_ = true;
-    static inline MovieCore *owner_ = nullptr; // the movie drawn in the overlay slot
+    static inline MovieCore *drawn_ = nullptr; // the movie drawn in the overlay slot
 };
 
-/// The krkrsdl3 player interfaces over MovieCore (overlay and layer differ only in base).
-template <class Base>
-class Player : public Base, public tTVPContinuousEventCallbackIntf {
+/// KiriKiri's video overlay object over MovieCore (overlay and layer modes differ in how a
+/// frame is shown).
+class Player : public iTVPVideoOverlay, public tTVPContinuousEventCallbackIntf {
 public:
-    Player(TVPVideoEventCallback callback, void *context, bool layer) : core_(callback, context, layer) {}
-    ~Player() override { TVPRemoveContinuousEventHook(this); }
+    Player(tTJSNI_VideoOverlay *owner, bool layer) : core_(owner, layer) {}
+    ~Player() { TVPRemoveContinuousEventHook(this); }
 
-    bool OpenStream(TJS::tTJSBinaryStream *stream, const ttstr &name) override { return core_.open(stream, name); }
+    bool open(const ttstr &name) {
+        tTJSBinaryStream *stream = TVPCreateStream(name, TJS_BS_READ);
+        return core_.open(stream, name);
+    }
     void OnContinuousCallback(tjs_uint64) override { core_.tick(); }
 
     void AddRef() override { ++references_; }
@@ -586,14 +609,34 @@ private:
     int references_ = 1;
 };
 
+iTVPVideoOverlay *makePlayer(tTJSNI_VideoOverlay *owner, const tjs_char *name, bool layer) {
+    auto *player = new Player(owner, layer);
+    if (!player->open(ttstr(name))) {
+        player->Release();
+        TVPThrowExceptionMessage((ttstr(TJS_W("ShioriKrkr can't play this movie: ")) + name).c_str());
+    }
+    return player;
+}
+
 } // namespace
 } // namespace shiorikrkr
 
-// krkrsdl3's platform video factory (environ/PlatformVideo.h), in place of its Apple stubs.
-OverlayVideoPlayer *CreateOverlayVideoPlayer(TVPVideoEventCallback cb, void *cbctx) {
-    return new shiorikrkr::Player<OverlayVideoPlayer>(cb, cbctx, false);
+// The environ's video overlay factories krkr2's VideoOverlay class calls (the stream it opened
+// is left alone: the player opens the storage itself, to read it as it plays).
+struct IStream;
+void GetVideoOverlayObject(tTJSNI_VideoOverlay *owner, IStream *, const tjs_char *name, const tjs_char *, uint64_t,
+                           iTVPVideoOverlay **out) {
+    *out = shiorikrkr::makePlayer(owner, name, false);
 }
-
-LayerVideoPlayer *CreateLayerVideoPlayer(TVPVideoEventCallback cb, void *cbctx) {
-    return new shiorikrkr::Player<LayerVideoPlayer>(cb, cbctx, true);
+void GetVideoLayerObject(tTJSNI_VideoOverlay *owner, IStream *, const tjs_char *name, const tjs_char *, uint64_t,
+                         iTVPVideoOverlay **out) {
+    *out = shiorikrkr::makePlayer(owner, name, true);
+}
+void GetMixingVideoOverlayObject(tTJSNI_VideoOverlay *owner, IStream *, const tjs_char *name, const tjs_char *, uint64_t,
+                                 iTVPVideoOverlay **out) {
+    *out = shiorikrkr::makePlayer(owner, name, false);
+}
+void GetMFVideoOverlayObject(tTJSNI_VideoOverlay *owner, IStream *, const tjs_char *name, const tjs_char *, uint64_t,
+                             iTVPVideoOverlay **out) {
+    *out = shiorikrkr::makePlayer(owner, name, false);
 }

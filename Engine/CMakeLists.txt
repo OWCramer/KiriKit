@@ -135,8 +135,12 @@ function(shiori_plugin name dll dir)
         COMPILE_OPTIONS "-include;${HERE}/compat/plugins/shiori_plugin_prefix.h")
     set(PLUGIN_SOURCES ${PLUGIN_SOURCES} ${files} PARENT_SCOPE)
 endfunction()
-# KAGParserEx: krkr2's core KAGParser is already KAGParserEx's parser (base/KAGParser.cpp);
-# the DLL name links to nothing more.
+# KAGParserEx (wamsoft): krkr2's core parser lacks some of it ([emb] escape=false, multi-line
+# tags, parameter macros); plugins/shiori_kagparserex.cpp builds it in under other names.
+set_source_files_properties("${HERE}/plugins/shiori_kagparserex.cpp" PROPERTIES
+    INCLUDE_DIRECTORIES "${UPSTREAM}/wamsoft/KAGParserEx"
+    COMPILE_OPTIONS "-include;${HERE}/compat/plugins/shiori_plugin_prefix.h")
+set(PLUGIN_SOURCES ${PLUGIN_SOURCES} "${HERE}/plugins/shiori_kagparserex.cpp")
 shiori_plugin(extrans extrans.dll "${UPSTREAM}/wamsoft/extrans" Main.cpp wave.cpp mosaic.cpp turn.cpp
     turntrans_table.cpp rotatebase.cpp rotatetrans.cpp ripple.cpp)
 shiori_plugin(AlphaMovie AlphaMovie.dll "${UPSTREAM}/wamsoft/AlphaMovie" AlphaMovie.cpp)
@@ -156,7 +160,7 @@ shiori_plugin(layerExDraw layerExDraw.dll "${SDL3PLUGINS}/LayerExDraw" LayerExDr
 file(GLOB SHIORI_ENVIRON_SOURCES CONFIGURE_DEPENDS "${HERE}/environ/*.cpp" "${HERE}/environ/*.mm")
 
 set(SHIORI_SOURCES "${HERE}/shiorikrkr_host.mm" "${HERE}/cx_decrypt.cpp" "${HERE}/nekoworks.cpp" "${HERE}/cursor_decode.mm"
-    "${HERE}/render/shiori_metal_render.mm")
+    "${HERE}/render/shiori_metal_render.mm" "${HERE}/shiorikrkr_movie.cpp")
 set(SOURCES ${SHIORI_SOURCES} ${PARSERS} "${GEN}/tjsDateWordMap.inc" ${TJS2_SOURCES} ${BASE_SOURCES} ${VISUAL_SOURCES}
     ${SOUND_SOURCES} ${UTILS_SOURCES} ${OTHER_CORE_SOURCES} ${SHIORI_ENVIRON_SOURCES}
     ${KRKR2_PLUGIN_SOURCES} ${PLUGIN_SOURCES} "${HERE}/getlangname.cpp" "${HERE}/shiori_plugin_links.cpp"

@@ -52,6 +52,7 @@ while read -r repo commit; do
         "$HERE/patches/wamsoft/$(basename "$repo").patch"
 done <<'PINS'
 wamsoft/AlphaMovie 774002179df78ea447696cf47cde3465690a36bb
+wamsoft/KAGParserEx 61d5f1e65f500b5aef5a621333f86f3457939b31
 wamsoft/extrans bd0611eced7e2731a8c8403148e06abea827467e
 wamsoft/layerExAreaAverage b04fbd29548e43d76293625e1d06a3141f0853d8
 wamsoft/layerExBTOA a57e7a25a9e079f95b93cf9768949e0f8789f685

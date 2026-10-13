@@ -1,5 +1,22 @@
+diff --git a/cpp/core/base/StorageIntf.cpp b/cpp/core/base/StorageIntf.cpp
+index e0f1f66..94a22fe 100644
+--- a/cpp/core/base/StorageIntf.cpp
++++ b/cpp/core/base/StorageIntf.cpp
+@@ -552,6 +552,12 @@ void TVPGetLocalName(ttstr &name) {
+ 
+ //---------------------------------------------------------------------------
+ ttstr TVPGetLocallyAccessibleName(const ttstr &name) {
++#ifdef SHIORIKRKR
++    // Shiori: nothing for no name (TVPGetPlacedPath's answer for a file that isn't there;
++    // fstat's deleteFile asks this way before a save replaces its old file).
++    if(name.IsEmpty())
++        return TJS_W("");
++#endif
+     if(TJS_strchr(name.c_str(), TVPArchiveDelimiter))
+         return TJS_W("");
+     // in-archive storage is always not accessible from local file
 diff --git a/cpp/core/base/TextStream.cpp b/cpp/core/base/TextStream.cpp
-index a70d4b6..e576220 100644
+index a70d4b6..ccd4304 100644
 --- a/cpp/core/base/TextStream.cpp
 +++ b/cpp/core/base/TextStream.cpp
 @@ -5,7 +5,6 @@
@@ -10,6 +27,35 @@ index a70d4b6..e576220 100644
  #include <spdlog/spdlog.h>
  
  #include "MsgIntf.h"
+@@ -84,9 +83,18 @@ public:
+             std::uint8_t m = raw[2];
+             if(m == 0 || m == 1) {
+                 // 解密 UTF-16 数据
++#ifdef SHIORIKRKR
++                // Shiori: the text follows the mode byte and a UTF-16 BOM (FE FE m FF FE).
++                const std::uint8_t *text = raw.data() + 5;
++                size_t len = size >= 5 ? (size - 5) / 2 : 0;
++                std::vector<char16_t> aligned(len);
++                if(len) memcpy(aligned.data(), text, len * 2);
++                const char16_t *src = aligned.data();
++#else
+                 const auto *src =
+                     reinterpret_cast<const char16_t *>(raw.data() + 4);
+                 size_t len = (size - 4) / 2;
++#endif
+                 _buffer.resize(len);
+                 for(size_t i = 0; i < len; i++) {
+                     char16_t ch = src[i];
+@@ -136,6 +144,9 @@ public:
+         std::uint8_t bomSize = 0;
+         std::string encoding = checkTextEncoding(raw.data(), size, bomSize);
+         raw.erase(raw.begin(), raw.begin() + bomSize);
++#ifdef SHIORIKRKR
++        size = raw.size(); // Shiori: without the BOM just taken off
++#endif
+ 
+         if(encoding.empty())
+             encoding = G_DefaultReadEncoding; // 默认回退
 diff --git a/cpp/core/base/UtilStreams.cpp b/cpp/core/base/UtilStreams.cpp
 index 42dc4c6..a8468ea 100644
 --- a/cpp/core/base/UtilStreams.cpp

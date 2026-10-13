@@ -5,6 +5,9 @@
 // psbfile.dll for ShioriKrkr: the PSBFile class NEKO WORKs' scripts read their scenario
 // files (.scn), snapshots and packed images with: new PSBFile(storage or octet), then .root,
 // the file's tree as TJS dictionaries, arrays, numbers, strings and octets (resources).
+// A file loaded from storage also lends its top-level resources to the "psb" storage media,
+// as psb://<file>/<key> (the file's extension in lower case): layered images (.PIMG) are
+// read that way, each layer's image a resource such as "12.tlg".
 //
 // The PSB layout is the one Shiori's own reader knows (CatSystemKit's PSB.swift): a header of
 // offsets, a key trie in three integer arrays, string offsets, resource offsets and lengths,
@@ -20,12 +23,60 @@
 
 #include <zlib.h>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
 #define NCB_MODULE_NAME TJS_W("psbfile.dll")
 
 namespace {
+
+// psb://: the resources of loaded PSB files, by "<file>/<key>".
+class PSBMedia final : public iTVPStorageMedia {
+public:
+    void AddRef() override { ++refs_; }
+    void Release() override {
+        if (--refs_ == 0) delete this;
+    }
+    void GetName(ttstr &name) override { name = TJS_W("psb"); }
+    // The extension of the file in lower case (the rest as given).
+    void NormalizeDomainName(ttstr &name) override {
+        tjs_int dot = name.IndexOf(TJS_W('.'));
+        if (dot < 0) return;
+        name = name.SubString(0, dot) + name.SubString(dot, name.GetLen()).AsLowerCase();
+    }
+    void NormalizePathName(ttstr &) override {}
+    bool CheckExistentStorage(const ttstr &name) override { return resources_.count(name.AsStdString()) != 0; }
+    tTJSBinaryStream *Open(const ttstr &name, tjs_uint32) override {
+        auto it = resources_.find(name.AsStdString());
+        if (it == resources_.end()) TVPThrowExceptionMessage((ttstr(TJS_W("psb: no storage ")) + name).c_str());
+        auto *stream = new tTVPMemoryStream();
+        if (!it->second.empty()) stream->WriteBuffer(it->second.data(), tjs_uint(it->second.size()));
+        stream->Seek(0, TJS_BS_SEEK_SET);
+        return stream;
+    }
+    void GetListAt(const ttstr &, iTVPStorageLister *) override {}
+    void GetLocallyAccessibleName(ttstr &name) override { name.Clear(); }
+
+    void add(ttstr file, const ttstr &key, const tTJSVariantOctet *octet) {
+        NormalizeDomainName(file);
+        auto &bytes = resources_[(file + TJS_W("/") + key).AsStdString()];
+        bytes.assign(octet->GetData(), octet->GetData() + octet->GetLength());
+    }
+
+private:
+    int refs_ = 1;
+    std::map<std::string, std::vector<uint8_t>> resources_;
+};
+
+PSBMedia *media() {
+    static PSBMedia *m = [] {
+        auto *made = new PSBMedia();
+        TVPRegisterStorageMedia(made);
+        return made;
+    }();
+    return m;
+}
 
 class PSBReader {
 public:
@@ -245,7 +296,7 @@ public:
         return TJS_S_OK;
     }
 
-    void load(tTJSVariant source) {
+    bool load(tTJSVariant source) {
         std::vector<uint8_t> bytes;
         ttstr name;
         if (source.Type() == tvtOctet) {
@@ -264,6 +315,31 @@ public:
         if (!reader.parse(root, error))
             TVPThrowExceptionMessage((ttstr(TJS_W("PSBFile: ")) + name + TJS_W(": ") + ttstr(error.c_str())).c_str());
         root_ = root;
+        if (source.Type() != tvtOctet) lend(name);
+        return true;
+    }
+
+    // Top-level resources go to psb://<name>/<key>.
+    void lend(const ttstr &name) {
+        if (root_.Type() != tvtObject) return;
+        iTJSDispatch2 *dict = root_.AsObjectNoAddRef();
+        struct Lender : public tTJSDispatch {
+            ttstr file;
+            tjs_error FuncCall(tjs_uint32, const tjs_char *, tjs_uint32 *, tTJSVariant *result, tjs_int count,
+                               tTJSVariant **param, iTJSDispatch2 *) override {
+                if (count >= 3 && param[2]->Type() == tvtOctet) {
+                    if (const tTJSVariantOctet *octet = param[2]->AsOctetNoAddRef())
+                        media()->add(file, ttstr(*param[0]), octet);
+                }
+                if (result) *result = tTJSVariant(tjs_int(1));
+                return TJS_S_OK;
+            }
+        };
+        auto *lender = new Lender();
+        lender->file = name;
+        tTJSVariantClosure closure(lender, nullptr);
+        dict->EnumMembers(TJS_IGNOREPROP, &closure, dict);
+        lender->Release();
     }
 
     tTJSVariant getRoot() const { return root_; }

@@ -26,6 +26,7 @@
 #include "cursor_decode.h"
 #include "shiorikrkr_emote.h"
 #include "render/shiori_metal_render.h"
+#include "shiorikrkr_movie.h"
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/base_sink.h>
@@ -363,6 +364,42 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
 
 SHIORIKRKR_EXPORT void *shiorikrkr_take_view(void) { return nullptr; }
 
+// The game's frame with an overlay-mode movie drawn over it at its rectangle (scaled to fit,
+// nearest pixel), recomposed only when either changes. False when no movie shows.
+static bool composeMovie(shiorikrkr_frame_t *frame, iTVPTexture2D *texture) {
+    static std::vector<uint8_t> composed;
+    static uint64_t composedGame = 0, composedMovie = 0, serial = 0;
+    std::lock_guard<std::mutex> lock(shiorikrkr::movieOverlayLock());
+    const shiorikrkr::MovieOverlayFrame *movie = shiorikrkr::movieOverlay();
+    if (!movie || !movie->visible || movie->rgba.empty()) return false;
+    const int w = frame->width, h = frame->height, pitch = w * 4;
+    if (frame->serial != composedGame || movie->serial != composedMovie || composed.size() != size_t(pitch) * h) {
+        composedGame = frame->serial;
+        composedMovie = movie->serial;
+        composed.resize(size_t(pitch) * h);
+        for (int y = 0; y < h; ++y)
+            memcpy(&composed[size_t(y) * pitch], texture->GetScanLineForRead(y), size_t(pitch));
+        int l = movie->left, t = movie->top, r = movie->right, b = movie->bottom;
+        if (r <= l || b <= t) l = 0, t = 0, r = w, b = h;
+        for (int y = std::max(t, 0); y < std::min(b, h); ++y) {
+            const int sy = (y - t) * movie->height / (b - t);
+            uint8_t *row = &composed[size_t(y) * pitch];
+            const uint8_t *source = &movie->rgba[size_t(sy) * movie->width * 4];
+            for (int x = std::max(l, 0); x < std::min(r, w); ++x) {
+                const int sx = (x - l) * movie->width / (r - l);
+                memcpy(row + x * 4, source + sx * 4, 4);
+            }
+        }
+        ++serial;
+    }
+    frame->pixels = composed.data();
+    frame->pitch = pitch;
+    frame->serial = (uint64_t(1) << 63) | serial;
+    frame->blank = 0;
+    frame->texture = nullptr;
+    return true;
+}
+
 SHIORIKRKR_EXPORT int shiorikrkr_frame(shiorikrkr_frame_t *frame) {
     Host &h = host();
     if (!frame || !h.started) return 0;
@@ -401,6 +438,8 @@ SHIORIKRKR_EXPORT int shiorikrkr_frame(shiorikrkr_frame_t *frame) {
         frame->blank = blank ? 1 : 0;
         h.sawContent = !blank;
     }
+
+    if (composeMovie(frame, texture)) return 1;
 
     // Composed on the GPU: a texture the host's GPU work waits for, no wait here.
     shiori::metal::PresentedFrame presented;
