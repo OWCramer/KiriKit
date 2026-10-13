@@ -50,6 +50,7 @@
 extern int _argc;
 extern char **_argv;
 extern bool TVPTerminated;
+void TVPShioriPrepareRestart();
 static double profileFrameWait = 0; // seconds frame() waited for the GPU since the last profile line
 extern double TVPShioriRenderSeconds;
 extern double TVPShioriImageLoadSeconds;
@@ -284,6 +285,7 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
     _argc = 2;
     _argv = h.argv.data();
 
+    TVPShioriPrepareRestart(); // a game played before in this process
     TVPTerminated = false;
     if (!::Application) ::Application = new tTVPApplication();
     bool ok = false;
@@ -606,6 +608,10 @@ SHIORIKRKR_EXPORT void shiorikrkr_stop(void) {
     } catch (...) {
         hostLog("ShioriKrkr: shutdown threw");
     }
+    // Messages the game's objects posted and never saw delivered hold pointers to them.
+    if (::Application)
+        ::Application->FilterUserMessage(
+            [](std::vector<std::tuple<void *, int, tTVPApplication::tMsg>> &messages) { messages.clear(); });
     shiori::audioShutdown();
     shiorikrkr::setEmoteHost(nullptr);
     shiori::cursorChanged = nullptr;

@@ -1,3 +1,22 @@
+diff --git a/cpp/core/base/ScriptMgnIntf.cpp b/cpp/core/base/ScriptMgnIntf.cpp
+index 757f829..7d70232 100644
+--- a/cpp/core/base/ScriptMgnIntf.cpp
++++ b/cpp/core/base/ScriptMgnIntf.cpp
+@@ -569,6 +569,14 @@ void TVPUninitScriptEngine() {
+ }
+ //---------------------------------------------------------------------------
+ 
++#ifdef SHIORIKRKR
++// Shiori: lets a later game in the same process start the script engine afresh.
++void TVPShioriResetScriptEngine() {
++    TVPScriptEngineInit = false;
++    TVPScriptEngineUninit = false;
++}
++#endif
++
+ //---------------------------------------------------------------------------
+ // TVPRestartScriptEngine
+ //---------------------------------------------------------------------------
 diff --git a/cpp/core/base/StorageIntf.cpp b/cpp/core/base/StorageIntf.cpp
 index e0f1f66..94a22fe 100644
 --- a/cpp/core/base/StorageIntf.cpp
@@ -16,7 +35,7 @@ index e0f1f66..94a22fe 100644
          return TJS_W("");
      // in-archive storage is always not accessible from local file
 diff --git a/cpp/core/base/SysInitIntf.cpp b/cpp/core/base/SysInitIntf.cpp
-index da49809..6d4263d 100644
+index da49809..691898e 100644
 --- a/cpp/core/base/SysInitIntf.cpp
 +++ b/cpp/core/base/SysInitIntf.cpp
 @@ -63,21 +63,30 @@ static void TVPCauseAtExit();
@@ -50,7 +69,7 @@ index da49809..6d4263d 100644
      TVPAfterSystemUninit();
  
      TVPCauseAtExit();
-@@ -132,6 +141,15 @@ static void TVPCauseAtExit() {
+@@ -132,9 +141,39 @@ static void TVPCauseAtExit() {
                TVPAtExitInfos->end()); // descending sort
  
      for(auto i = TVPAtExitInfos->begin(); i != TVPAtExitInfos->end(); ++i) {
@@ -66,6 +85,30 @@ index da49809..6d4263d 100644
          i->Handler();
      }
  
++#ifndef SHIORIKRKR
+     delete TVPAtExitInfos;
++#endif
+ }
++
++#ifdef SHIORIKRKR
++// Shiori: a second game in the same process. The at-exit handlers registered by static
++// objects are kept (they only register once) and run again at the next shutdown.
++extern void TVPShioriResetScriptEngine();
++extern bool TVPTransHandlerProviderInit;
++extern void TVPShioriResetPlugins();
++extern void TVPShioriResetArchiveHandleCache();
++void TVPShioriPrepareRestart() {
++    if(!TVPSystemUninitCalled)
++        return;
++    TVPSystemUninitCalled = false;
++    TVPAtExitShutdown = false;
++    TVPShioriResetScriptEngine();
++    TVPTransHandlerProviderInit = true;
++    TVPShioriResetPlugins();
++    TVPShioriResetArchiveHandleCache();
++}
++#endif
+ //---------------------------------------------------------------------------
 diff --git a/cpp/core/base/TextStream.cpp b/cpp/core/base/TextStream.cpp
 index a70d4b6..ccd4304 100644
 --- a/cpp/core/base/TextStream.cpp
@@ -126,7 +169,7 @@ index 42dc4c6..a8468ea 100644
  }
 +#endif // SHIORIKRKR
 diff --git a/cpp/core/base/XP3Archive.cpp b/cpp/core/base/XP3Archive.cpp
-index 11d8371..d73fb99 100644
+index 11d8371..3fe15e0 100644
 --- a/cpp/core/base/XP3Archive.cpp
 +++ b/cpp/core/base/XP3Archive.cpp
 @@ -20,6 +20,8 @@
@@ -146,7 +189,36 @@ index 11d8371..d73fb99 100644
  
  void TVPSetXP3ArchiveContentFilter(tTVPXP3ArchiveContentFilter filter) {
      TVPXP3ArchiveContentFilter = filter;
-@@ -403,6 +406,74 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+@@ -177,6 +180,15 @@ static void TVPFreeArchiveHandlePool() {
+     }
+ }
+ 
++#ifdef SHIORIKRKR
++// Shiori: a later game in the same process caches handles again.
++void TVPShioriResetArchiveHandleCache() {
++    // The pool was freed at shutdown; the next use makes a new one.
++    TVPArchiveHandleCacheShutdown = false;
++    TVPArchiveHandleCacheInit = false;
++    TVPArchiveHandleCachePool = nullptr;
++}
++#endif
+ //---------------------------------------------------------------------------
+ static void TVPShutdownArchiveHandleCache() {
+     // free all stream and shutdown the pool
+@@ -189,6 +201,12 @@ static void TVPShutdownArchiveHandleCache() {
+     for(tjs_int i = 0; i < TVP_MAX_ARCHIVE_HANDLE_CACHE; i++) {
+         if(TVPArchiveHandleCachePool[i].Stream)
+             delete TVPArchiveHandleCachePool[i].Stream;
++#ifdef SHIORIKRKR
++        // Shiori: the pool can be shut down again by a later game in the process.
++        TVPArchiveHandleCachePool[i].Stream = nullptr;
++        TVPArchiveHandleCachePool[i].Pointer = nullptr;
++        TVPArchiveHandleCachePool[i].Age = 0;
++#endif
+     }
+     delete[] TVPArchiveHandleCachePool;
+ }
+@@ -403,6 +421,74 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
                  TVPThrowExceptionMessage(TVPReadError);
              }
  
@@ -221,7 +293,7 @@ index 11d8371..d73fb99 100644
              // read index information from memory
              tjs_uint ch_file_start = 0;
              tjs_uint ch_file_size = index_size;
-@@ -411,6 +482,9 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+@@ -411,6 +497,9 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
                  // find 'File' chunk
                  if(!FindChunk(indexdata, cn_File, ch_file_start, ch_file_size))
                      break; // not found
@@ -231,7 +303,7 @@ index 11d8371..d73fb99 100644
  
                  // find 'info' sub-chunk
                  tjs_uint ch_info_start = ch_file_start;
-@@ -426,6 +500,7 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+@@ -426,6 +515,7 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
                     (flags & TVP_XP3_FILE_PROTECTED))
                      TVPThrowExceptionMessage(
                          TVPSpecifiedStorageHadBeenProtected);
@@ -239,7 +311,7 @@ index 11d8371..d73fb99 100644
                  item.OrgSize = ReadI64FromMem(indexdata + ch_info_start + 4);
                  item.ArcSize = ReadI64FromMem(indexdata + ch_info_start + 12);
  
-@@ -487,6 +562,36 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+@@ -487,6 +577,36 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
  
                  // read 'aldr' sub-chunk
                  item.FileHash = ReadI32FromMem(indexdata + ch_adlr_start);
@@ -276,7 +348,7 @@ index 11d8371..d73fb99 100644
  
                  // push information
                  ItemVector.push_back(item);
-@@ -495,6 +600,7 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+@@ -495,6 +615,7 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
                  ch_file_start += ch_file_size;
                  ch_file_size = index_size - ch_file_start;
                  Count++;
@@ -284,7 +356,7 @@ index 11d8371..d73fb99 100644
              }
  
              if(!(index_flag & TVP_XP3_INDEX_CONTINUE))
-@@ -995,7 +1101,8 @@ tjs_uint tTVPXP3ArchiveStream::Read(void *buffer, tjs_uint read_size) {
+@@ -995,7 +1116,8 @@ tjs_uint tTVPXP3ArchiveStream::Read(void *buffer, tjs_uint read_size) {
          }
  
          // execute filter (for encryption method)
@@ -358,8 +430,34 @@ index f1f07ee..9769d25 100644
      void SetHintText(iTJSDispatch2 *sender, const ttstr &text) {}
      void DisableAttentionPoint() {}
      static void GetVideoOffset(tjs_int &ofsx, tjs_int &ofsy) {
+diff --git a/cpp/core/plugin/PluginImpl.cpp b/cpp/core/plugin/PluginImpl.cpp
+index 601cab8..32e7c8c 100644
+--- a/cpp/core/plugin/PluginImpl.cpp
++++ b/cpp/core/plugin/PluginImpl.cpp
+@@ -91,8 +91,21 @@ static void TVPSearchPluginsAt(std::vector<tTVPFoundPlugin> &list,
+     });
+ }
+ 
++#ifdef SHIORIKRKR
++// Shiori: a later game in the same process loads the plug-ins into its own script engine.
++void TVPShioriResetPlugins() { TVPRegisteredPlugins.clear(); }
++#endif
+ void TVPLoadInternalPlugins() {
++#ifdef SHIORIKRKR
++    // Shiori: the lists are filled once per process (a second fill would register twice).
++    static bool listed = false;
++    if(!listed) {
++        listed = true;
++        ncbAutoRegister::AllRegist();
++    }
++#else
+     ncbAutoRegister::AllRegist();
++#endif
+     ncbAutoRegister::LoadModule(TJS_W("xp3filter.dll"));
+ }
+ 
 diff --git a/cpp/core/plugin/ncbind.hpp b/cpp/core/plugin/ncbind.hpp
-index 70e0619..9613a54 100644
+index 70e0619..632783e 100644
 --- a/cpp/core/plugin/ncbind.hpp
 +++ b/cpp/core/plugin/ncbind.hpp
 @@ -14,6 +14,7 @@
@@ -370,6 +468,48 @@ index 70e0619..9613a54 100644
  
  inline std::set<ttstr> TVPRegisteredPlugins;
  
+@@ -1860,6 +1861,10 @@ struct ncbRegistNativeClass : public ncbRegistNativeClassBase {
+ 		IdentT id  = TJSRegisterNativeClass(_className);
+ 
+ 		// ncbClassInfoに登録
++#ifdef SHIORIKRKR
++		// Shiori: one script engine at a time; a class left from an earlier one is replaced.
++		ClassInfoT::Clear();
++#endif
+ 		if (!ClassInfoT::Set(_className, id, _classobj))
+ 			TVPThrowExceptionMessage(TJS_W("Already registerd class."));
+ 
+@@ -1989,7 +1994,10 @@ struct ncbSubClassItem : public ncbIMethodObject {
+ 		typedef ncbRegistSubClass<T> DelegateT;
+ 		typedef ncbRegistClass<DelegateT> RegistT;
+ 
++#ifndef SHIORIKRKR
+ 		if (isRegist && ClassInfoT::GetClassObject()) return false;
++#endif
++		// Shiori: one left from an earlier script engine is registered afresh (RegistBegin).
+ 		DelegateT d(name);
+ 		{
+ 			RegistT r(d, isRegist);
+@@ -2023,6 +2031,9 @@ struct ncbAttachTJS2Class : public ncbRegistNativeClassBase {
+ 		IdentT id  = TJSRegisterNativeClass(_className);
+ 
+ 		// ncbClassInfoに登録
++#ifdef SHIORIKRKR
++		ClassInfoT::Clear(); // Shiori: as above
++#endif
+ 		if (!ClassInfoT::Set(_className, id, 0)) {
+ 			TVPThrowExceptionMessage(TJS_W("Already registerd class:"), ttstr(_className));
+ 		}
+@@ -2208,6 +2219,9 @@ protected:
+ 			TVPThrowExceptionMessage(TJS_W("Require class not found."));
+ 
+ 		// IDとクラスオブジェクトを登録
++#ifdef SHIORIKRKR
++		ClassInfoT::Clear(); // Shiori: as above
++#endif
+ 		if (!ClassInfoT::Set(_className, TJSFindNativeClassID(_className), val.AsObjectNoAddRef()))
+ 			TVPThrowExceptionMessage(TJS_W("Already registerd class."));
+ 	}
 diff --git a/cpp/core/sound/WaveIntf.cpp b/cpp/core/sound/WaveIntf.cpp
 index 679ef2e..4fe229b 100644
 --- a/cpp/core/sound/WaveIntf.cpp
@@ -752,6 +892,20 @@ index 70d2014..9603619 100644
  #endif
      iTVPTexture2D *GetTexture() override;
      iTVPTexture2D *GetTextureForRender() override;
+diff --git a/cpp/core/visual/impl/LayerBitmapImpl.cpp b/cpp/core/visual/impl/LayerBitmapImpl.cpp
+index 31858aa..5b58d32 100644
+--- a/cpp/core/visual/impl/LayerBitmapImpl.cpp
++++ b/cpp/core/visual/impl/LayerBitmapImpl.cpp
+@@ -87,6 +87,9 @@ void TVPUninitializeFontRasterizers() {
+         delete TVPFontSystem;
+         TVPFontSystem = nullptr;
+     }
++#ifdef SHIORIKRKR
++    TVPFontRasterizersInit = false; // Shiori: a later game in the process makes them again
++#endif
+ }
+ static tTVPAtExit TVPUninitializeFontRaster(TVP_ATEXIT_PRI_RELEASE,
+                                             TVPUninitializeFontRasterizers);
 diff --git a/cpp/core/visual/impl/WindowImpl.cpp b/cpp/core/visual/impl/WindowImpl.cpp
 index 71acfe0..0e62ed5 100644
 --- a/cpp/core/visual/impl/WindowImpl.cpp
