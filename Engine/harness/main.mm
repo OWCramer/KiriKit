@@ -42,6 +42,7 @@ int main(int argc, char **argv) {
         std::string base, patch, work, exe = "game.exe", scheme, font;
         int frames = 600;
         bool present = false;
+        int sessions = 1; // --again: leave the game and start it again in the same process
         std::multimap<int, std::pair<float, float>> clicks;
         std::multimap<int, std::string> evals, captures;
         std::vector<std::string> options;
@@ -59,6 +60,7 @@ int main(int argc, char **argv) {
             else if (a == "--scheme") scheme = next();
             else if (a == "--font") font = next();
             else if (a == "--present") present = true;
+            else if (a == "--again") sessions = 2;
             else if (a == "--frames") frames = std::atoi(next().c_str());
             else if (a == "--click") {
                 auto [frame, rest] = split(next());
@@ -113,6 +115,7 @@ int main(int argc, char **argv) {
         };
         config.host_presents = present ? 1 : 0;
 
+        for (int session = 0; session < sessions; ++session) {
         const auto started = std::chrono::steady_clock::now();
         const int status = shiorikrkr_start(&config);
         std::printf("== start: %d (%.2f s)\n", status,
@@ -152,6 +155,14 @@ int main(int argc, char **argv) {
                                 std::fwrite(presented.pixels + y * presented.pitch + x * 4, 1, 3, out);
                         std::fclose(out);
                     }
+                    // And its alpha channel (a PGM), which the presenter ignores but MetalFX sees.
+                    if (FILE *out = std::fopen((it->second + ".alpha.pgm").c_str(), "wb")) {
+                        std::fprintf(out, "P5\n%d %d\n255\n", presented.width, presented.height);
+                        for (int y = 0; y < presented.height; ++y)
+                            for (int x = 0; x < presented.width; ++x)
+                                std::fputc(presented.pixels[y * presented.pitch + x * 4 + 3], out);
+                        std::fclose(out);
+                    }
                     std::printf("== frame %d: presented %dx%d serial %llu blank %d\n", frame, presented.width,
                                 presented.height, (unsigned long long)presented.serial, presented.blank);
                 }
@@ -160,6 +171,8 @@ int main(int argc, char **argv) {
         }
         std::printf("== ran %d frames\n", frame);
         shiorikrkr_stop();
+        std::printf("== stopped (session %d)\n", session + 1);
+        }
         return 0;
     }
 }

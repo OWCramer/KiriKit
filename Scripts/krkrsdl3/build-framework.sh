@@ -27,7 +27,7 @@ configure_and_build() { # slice triplet extra-args...
     shift 2
     echo "== $slice ($triplet)"
     cmake -S "$ENGINE" -B "$WORK/$slice" -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
         -DCMAKE_TOOLCHAIN_FILE="$VENDOR/vcpkg/scripts/buildsystems/vcpkg.cmake" \
         -DVCPKG_TARGET_TRIPLET="$triplet" \
         -DVCPKG_INSTALLED_DIR="$VENDOR/krkrsdl3-deps/$triplet" \
@@ -44,6 +44,11 @@ make_framework() { # slice platform
     mkdir -p "$framework"
     cp "$WORK/$slice/lib$NAME.dylib" "$framework/$NAME"
     install_name_tool -id "@rpath/$NAME.framework/$NAME" "$framework/$NAME"
+    # The debug symbols go to Vendor/ShioriKrkr.dSYM/<slice> (crash logs from the shipped,
+    # stripped binary symbolicate against it; the archive script copies it in).
+    mkdir -p "$VENDOR/ShioriKrkr.dSYM/$slice"
+    rm -rf "$VENDOR/ShioriKrkr.dSYM/$slice/$NAME.framework.dSYM"
+    dsymutil "$framework/$NAME" -o "$VENDOR/ShioriKrkr.dSYM/$slice/$NAME.framework.dSYM"
     strip -x "$framework/$NAME" 2>/dev/null || true
     cat > "$framework/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
