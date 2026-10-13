@@ -38,6 +38,8 @@ const shiorikrkr_api_t *shiorikrkr_load(const char *path, char *error, uint32_t 
     RESOLVE(eval, "shiorikrkr_eval")
     RESOLVE(capture, "shiorikrkr_capture")
     RESOLVE(stop, "shiorikrkr_stop")
+    RESOLVE(frame, "shiorikrkr_frame")
+    RESOLVE(cursor, "shiorikrkr_cursor")
 #undef RESOLVE
     loaded = 1;
     return &api;

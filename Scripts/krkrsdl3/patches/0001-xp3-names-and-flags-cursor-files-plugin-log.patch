@@ -1,0 +1,210 @@
+diff --git a/core/archive/XP3Archive.cpp b/core/archive/XP3Archive.cpp
+index 7612aff..339e102 100644
+--- a/core/archive/XP3Archive.cpp
++++ b/core/archive/XP3Archive.cpp
+@@ -21,6 +21,8 @@
+ #include "PlatformMutex.h"
+ 
+ #include <zlib.h>
++#include <unordered_map>
++#include <unordered_set>
+ 
+ //---------------------------------------------------------------------------
+ // archive filter related
+@@ -32,6 +34,7 @@ void TVPSetXP3ArchiveExtractionFilter(tTVPXP3ArchiveExtractionFilter filter)
+ }
+ 
+ static tTVPXP3ArchiveContentFilter TVPXP3ArchiveContentFilter = nullptr;
++bool TVPXP3FilterOnlyFlaggedMembers = false;
+ void TVPSetXP3ArchiveContentFilter(tTVPXP3ArchiveContentFilter filter)
+ {
+     TVPXP3ArchiveContentFilter = filter;
+@@ -256,6 +259,34 @@ void tTVPXP3Archive::Init(tTJSBinaryStream* st, tjs_int64 off, bool normalizeNam
+                 TVPThrowExceptionMessage(TVPReadError);
+             }
+ 
++            // 'hnfn' chunks (archives whose File entries carry hashed names): each maps an
++            // entry's adlr hash to its real name (u32 hash, u16 length, UTF-16 name).
++            static const tjs_uint8 cn_hnfn[] = {0x68 /*'h'*/, 0x6e /*'n'*/, 0x66 /*'f'*/, 0x6e /*'n'*/};
++            std::unordered_map<tjs_uint32, ttstr> hashed_names;
++            std::unordered_set<std::string> hashed_name_set; // normalized
++            {
++                tjs_uint ch_start = 0;
++                tjs_uint ch_size = index_size;
++                while (FindChunk(indexdata, cn_hnfn, ch_start, ch_size))
++                {
++                    if (ch_size >= 6)
++                    {
++                        tjs_uint32 hash = ReadI32FromMem(indexdata + ch_start);
++                        tjs_uint len = ReadI16FromMem(indexdata + ch_start + 4);
++                        if (6 + len * 2 <= ch_size)
++                        {
++                            ttstr real = TVPStringFromBMPUnicode(
++                                (const tjs_uint16*)(indexdata + ch_start + 6), len);
++                            hashed_names[hash] = real;
++                            NormalizeInArchiveStorageName(real);
++                            hashed_name_set.insert(real.AsStdString());
++                        }
++                    }
++                    ch_start += ch_size;
++                    ch_size = index_size - ch_start;
++                }
++            }
++
+             // read index information from memory
+             tjs_uint ch_file_start = 0;
+             tjs_uint ch_file_size = index_size;
+@@ -277,6 +308,7 @@ void tTVPXP3Archive::Init(tTJSBinaryStream* st, tjs_int64 off, bool normalizeNam
+                 tjs_uint32 flags = ReadI32FromMem(indexdata + ch_info_start + 0);
+                 if (!TVPAllowExtractProtectedStorage && (flags & TVP_XP3_FILE_PROTECTED))
+                     TVPThrowExceptionMessage(TVPSpecifiedStorageHadBeenProtected);
++                item.InfoFlags = flags;
+                 item.OrgSize = ReadI64FromMem(indexdata + ch_info_start + 4);
+                 item.ArcSize = ReadI64FromMem(indexdata + ch_info_start + 12);
+ 
+@@ -331,14 +363,35 @@ void tTVPXP3Archive::Init(tTJSBinaryStream* st, tjs_int64 off, bool normalizeNam
+ 
+                 // read 'aldr' sub-chunk
+                 item.FileHash = ReadI32FromMem(indexdata + ch_adlr_start);
++                bool decoy = false;
++                if (!hashed_names.empty())
++                {
++                    auto real = hashed_names.find(item.FileHash);
++                    if (real != hashed_names.end())
++                    {
++                        item.Name = real->second;
++                        if (normalizeName)
++                            NormalizeInArchiveStorageName(item.Name);
++                    }
++                    else
++                    {
++                        // A plainly named entry that an 'hnfn' name also claims (startup.tjs)
++                        // is a decoy for extractors; the hashed entry is the real file.
++                        ttstr plain = item.Name;
++                        NormalizeInArchiveStorageName(plain);
++                        decoy = hashed_name_set.count(plain.AsStdString()) != 0;
++                    }
++                }
+ 
+                 // push information
+-                ItemVector.push_back(item);
++                if (!decoy)
++                    ItemVector.push_back(item);
+ 
+                 // to next file
+                 ch_file_start += ch_file_size;
+                 ch_file_size = index_size - ch_file_start;
+-                Count++;
++                if (!decoy)
++                    Count++;
+             }
+ 
+             if (!(index_flag & TVP_XP3_INDEX_CONTINUE))
+@@ -887,7 +940,8 @@ tjs_uint tTVPXP3ArchiveStream::Read(void* buffer, tjs_uint read_size)
+         }
+ 
+         // execute filter (for encryption method)
+-        if (TVPXP3ArchiveExtractionFilter)
++        if (TVPXP3ArchiveExtractionFilter &&
++            (!TVPXP3FilterOnlyFlaggedMembers || Owner->GetInfoFlags(StorageIndex) != 0))
+         {
+             tTVPXP3ExtractionFilterInfo info(CurPos, (tjs_uint8*)buffer + write_size, one_size,
+                                              Owner->GetFileHash(StorageIndex),
+diff --git a/core/archive/XP3Archive.h b/core/archive/XP3Archive.h
+index 6ff66bc..b919f54 100644
+--- a/core/archive/XP3Archive.h
++++ b/core/archive/XP3Archive.h
+@@ -55,6 +55,9 @@ typedef tjs_int (*tTVPXP3ArchiveContentFilter)(const ttstr& filepath,
+ //---------------------------------------------------------------------------
+ void TVPSetXP3ArchiveExtractionFilter(tTVPXP3ArchiveExtractionFilter filter);
+ void TVPSetXP3ArchiveContentFilter(tTVPXP3ArchiveContentFilter filter);
++// When set, the extraction filter only runs on members whose 'info' flags are non-zero (an
++// archive's plainly stored members, such as its extraction warning, stay as they are).
++extern bool TVPXP3FilterOnlyFlaggedMembers;
+ //---------------------------------------------------------------------------
+ 
+ //---------------------------------------------------------------------------
+@@ -91,6 +94,7 @@ public:
+         tjs_uint32 FileHash;
+         tjs_uint64 OrgSize; // original ( uncompressed ) size
+         tjs_uint64 ArcSize; // in-archive size
++        tjs_uint32 InfoFlags = 0; // the 'info' chunk's flags (0: stored plain)
+         std::vector<tTVPXP3ArchiveSegment> Segments;
+         bool operator<(const tArchiveItem& rhs) const { return this->Name < rhs.Name; }
+     };
+@@ -115,6 +119,7 @@ public:
+     tjs_uint GetCount() { return Count; }
+     const ttstr& GetName(tjs_uint idx) const { return ItemVector[idx].Name; }
+     tjs_uint32 GetFileHash(tjs_uint idx) const { return ItemVector[idx].FileHash; }
++    tjs_uint32 GetInfoFlags(tjs_uint idx) const { return ItemVector[idx].InfoFlags; }
+     ttstr GetName(tjs_uint idx) { return ItemVector[idx].Name; }
+ 
+     const ttstr& GetName() const { return ArchiveName; }
+diff --git a/core/main/TVPWindow.cpp b/core/main/TVPWindow.cpp
+index bc37dd6..cde11f1 100644
+--- a/core/main/TVPWindow.cpp
++++ b/core/main/TVPWindow.cpp
+@@ -1102,8 +1102,15 @@ void TVPWindow::EndBitmapCompletion(iTVPLayerManager* manager)
+         DrawDevice->EndBitmapCompletion(manager);
+ }
+ //---------------------------------------------------------------------------
++// A host app embedding krkrsdl3 can draw the game's cursor: it hears each change, with the
++// cursor file's storage name for cursors loaded from files (else an empty name).
++void (*TVPHostMouseCursor)(tjs_int cursor, const char* storage) = nullptr;
++ttstr TVPGetCursorStorage(tjs_int id);
++
+ void TVPWindow::SetMouseCursor(iTVPLayerManager* manager, tjs_int cursor)
+ {
++    if (TVPHostMouseCursor)
++        TVPHostMouseCursor(cursor, TVPGetCursorStorage(cursor).AsStdString().c_str());
+     if (DrawDevice)
+     {
+         if (cursor == 0)
+diff --git a/core/script/tjsNativeWindow.cpp b/core/script/tjsNativeWindow.cpp
+index aef8b22..d26d39c 100644
+--- a/core/script/tjsNativeWindow.cpp
++++ b/core/script/tjsNativeWindow.cpp
+@@ -305,6 +305,8 @@ void tTJSNI_Window::PostInputEvent(const ttstr& name, iTJSDispatch2* params)
+ // Mouse Cursor management
+ //---------------------------------------------------------------------------
+ static tTJSHashTable<ttstr, tjs_int> TVPCursorTable;
++static std::vector<ttstr> TVPCursorStorages;
++static const tjs_int TVPCursorIdBase = 1000;
+ tjs_int TVPGetCursor(const ttstr& name)
+ {
+     // get placed path
+@@ -314,7 +316,20 @@ tjs_int TVPGetCursor(const ttstr& name)
+     tjs_int* in_hash = TVPCursorTable.Find(place);
+     if (in_hash)
+         return *in_hash;
+-    return 0;
++    // A cursor file (.cur/.ani) gets a number of its own, which a host can turn back into the
++    // file (TVPGetCursorStorage) and draw.
++    if (place.IsEmpty())
++        return 0;
++    TVPCursorStorages.push_back(place);
++    tjs_int id = TVPCursorIdBase + (tjs_int)TVPCursorStorages.size() - 1;
++    TVPCursorTable.Add(place, id);
++    return id;
++}
++ttstr TVPGetCursorStorage(tjs_int id)
++{
++    if (id < TVPCursorIdBase || id - TVPCursorIdBase >= (tjs_int)TVPCursorStorages.size())
++        return ttstr();
++    return TVPCursorStorages[id - TVPCursorIdBase];
+ }
+ //---------------------------------------------------------------------------
+ 
+diff --git a/plugins/TVPPlugin.cpp b/plugins/TVPPlugin.cpp
+index d955b44..555291f 100644
+--- a/plugins/TVPPlugin.cpp
++++ b/plugins/TVPPlugin.cpp
+@@ -39,6 +39,8 @@ static bool TVPPluginLoading = false;
+ void TVPLoadPlugin(const ttstr& name)
+ {
+     bool success = TVPLoadInternalPlugin(name);
++    TVPAddLog(ttstr(success ? TJS_N("(info) Plugin linked (built in): ") : TJS_N("(warn) Plugin not built in: ")) +
++              TVPExtractStorageName(name));
+     return; // seal all plugins
+ }
+ //---------------------------------------------------------------------------

@@ -8,6 +8,7 @@
 // game's own folder is never written to.
 //
 //   shiorikrkr-harness --base <game>/base [--patch <game>/patch] --work <scratch>
+//       [--present]  (frames go to the host, as the app's Metal presenter takes them)
 //       [--exe KARAKARA2.exe] [--scheme scheme.shcx] [--font default.ttf] [--frames 600]
 //       [--click FRAME:X,Y]... [--eval FRAME:TJS]... [--capture FRAME:out.bmp]...
 //       [-- krkrsdl3 options, e.g. -render=software]
@@ -40,6 +41,7 @@ int main(int argc, char **argv) {
     @autoreleasepool {
         std::string base, patch, work, exe = "game.exe", scheme, font;
         int frames = 600;
+        bool present = false;
         std::multimap<int, std::pair<float, float>> clicks;
         std::multimap<int, std::string> evals, captures;
         std::vector<std::string> options;
@@ -56,6 +58,7 @@ int main(int argc, char **argv) {
             else if (a == "--exe") exe = next();
             else if (a == "--scheme") scheme = next();
             else if (a == "--font") font = next();
+            else if (a == "--present") present = true;
             else if (a == "--frames") frames = std::atoi(next().c_str());
             else if (a == "--click") {
                 auto [frame, rest] = split(next());
@@ -103,6 +106,12 @@ int main(int argc, char **argv) {
         config.arguments = optionPointers.data();
         config.argument_count = (uint32_t)optionPointers.size();
         config.log = logLine;
+        // Message boxes: logged and answered with the first button.
+        config.message = [](void *, const char *text, const char *caption, const char *const *, int32_t count) -> int32_t {
+            std::printf("== message box [%s] %s (%d buttons) -> 0\n", caption ? caption : "", text ? text : "", count);
+            return 0;
+        };
+        config.host_presents = present ? 1 : 0;
 
         const auto started = std::chrono::steady_clock::now();
         const int status = shiorikrkr_start(&config);
@@ -132,6 +141,20 @@ int main(int argc, char **argv) {
                 int32_t w = 0, h = 0;
                 shiorikrkr_canvas_size(&w, &h);
                 std::printf("== frame %d: capture %s -> %d (canvas %dx%d)\n", frame, it->second.c_str(), r, w, h);
+                shiorikrkr_frame_t presented = {};
+                if (shiorikrkr_frame(&presented)) {
+                    // The host presenter's frame too, as a PPM beside the capture.
+                    const std::string ppm = it->second + ".presented.ppm";
+                    if (FILE *out = std::fopen(ppm.c_str(), "wb")) {
+                        std::fprintf(out, "P6\n%d %d\n255\n", presented.width, presented.height);
+                        for (int y = 0; y < presented.height; ++y)
+                            for (int x = 0; x < presented.width; ++x)
+                                std::fwrite(presented.pixels + y * presented.pitch + x * 4, 1, 3, out);
+                        std::fclose(out);
+                    }
+                    std::printf("== frame %d: presented %dx%d serial %llu blank %d\n", frame, presented.width,
+                                presented.height, (unsigned long long)presented.serial, presented.blank);
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
         }

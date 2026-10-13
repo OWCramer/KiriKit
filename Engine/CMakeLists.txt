@@ -44,7 +44,9 @@ set(SOURCES ${KRKRSDL_CORE_SRC} ${KRKRSDL_ENVIRON_SRC} ${KRKRSDL_PLUGINS_SRC} ${
 list(REMOVE_ITEM SOURCES "${KRKRSDL3}/environ/sdl3/sdl3_entry.cpp")
 list(APPEND SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_host.mm"
-    "${CMAKE_CURRENT_SOURCE_DIR}/cx_decrypt.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/cx_decrypt.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_presenter.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cursor_decode.mm")
 
 option(SHIORIKRKR_DEBUG_THROW "Backtrace every C++ throw (SHIORIKRKR_TRACE_THROW=1)" OFF)
 if(SHIORIKRKR_DEBUG_THROW)
@@ -63,7 +65,8 @@ endif()
 # Upstream code is written for warnings-off builds; keep the log readable.
 target_compile_options(ShioriKrkr PRIVATE -w)
 # krkrsdl3's Objective-C++ is manual retain/release; Shiori's is ARC.
-set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_host.mm" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_host.mm" "${CMAKE_CURRENT_SOURCE_DIR}/cursor_decode.mm"
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
 target_include_directories(ShioriKrkr PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../Sources/CShioriKrkr/include"
@@ -112,13 +115,13 @@ if(IOS)
         "-framework Foundation" "-framework UIKit" "-framework CoreGraphics" "-framework QuartzCore"
         "-framework AVFoundation" "-framework AudioToolbox" "-framework GameController" "-framework Metal"
         "-framework CoreMotion" "-framework CoreHaptics" "-framework CoreBluetooth" "-framework CoreAudio"
-        "-framework UniformTypeIdentifiers")
+        "-framework UniformTypeIdentifiers" "-framework ImageIO")
 else()
     target_link_libraries(ShioriKrkr PRIVATE
         "-framework Foundation" "-framework AppKit" "-framework CoreGraphics" "-framework QuartzCore"
         "-framework IOKit" "-framework ForceFeedback" "-framework GameController" "-framework AudioToolbox"
         "-framework Carbon" "-framework Metal" "-framework CoreAudio" "-framework CoreHaptics"
-        "-framework UniformTypeIdentifiers" "-framework AVFoundation")
+        "-framework UniformTypeIdentifiers" "-framework AVFoundation" "-framework ImageIO")
     # The Mac harness: runs a game headless-ish (a window, no app), taps and captures.
     add_executable(shiorikrkr-harness "${CMAKE_CURRENT_SOURCE_DIR}/harness/main.mm")
     target_include_directories(shiorikrkr-harness PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../Sources/CShioriKrkr/include")

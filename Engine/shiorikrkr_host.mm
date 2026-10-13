@@ -30,6 +30,16 @@
 #include "XP3Archive.h"
 
 #include "cx_decrypt.h"
+#include "shiorikrkr_presenter.h"
+#include "cursor_decode.h"
+#include <deque>
+#include <functional>
+#include <map>
+
+// krkrsdl3 patch 0002: host hooks.
+extern krkrsdl3::iTVPRenderBackend *(*TVPHostRenderBackendFactory)();
+extern void (*TVPHostMouseCursor)(tjs_int cursor, const char *storage);
+extern int (*TVPHostMessageBox)(const char *text, const char *caption, const char *const *buttons, int buttonCount);
 
 #if TARGET_OS_IPHONE
 #import <UIKit/UIKit.h>
@@ -51,6 +61,22 @@ struct Host {
     std::vector<char *> argv;
     std::unique_ptr<shiorikrkr::CxDecryptor> cx;
     bool viewTaken = false;
+    shiorikrkr_message_fn message = nullptr;
+    void *messageContext = nullptr;
+    bool hostPresents = false;
+    shiorikrkr::PresenterBackend *presenter = nullptr; // owned by krkrsdl3 once installed
+    // The game's cursor: the last one set, decoded files by cursor number.
+    tjs_int cursor = 0;
+    uint32_t cursorSerial = 0;
+    std::map<tjs_int, std::shared_ptr<shiorikrkr::DecodedCursor>> cursorFiles;
+    // Pointer input waiting for the engine. A button goes down a tick after the pointer
+    // arrives and comes up at least a tick later: KAG's buttons light up on the move and
+    // only then take a click, which a tap delivered all at once never was.
+    struct PendingInput {
+        bool button;
+        std::function<void()> deliver;
+    };
+    std::deque<PendingInput> input;
 };
 
 Host &host() {
@@ -81,6 +107,41 @@ void cxFilter(tTVPXP3ExtractionFilterInfo *info, tTJSVariant *) {
                 info->BufferSize > 2 ? b[2] : 0, info->BufferSize > 3 ? b[3] : 0);
     }
     cx->decrypt(info->FileHash, info->Offset, static_cast<uint8_t *>(info->Buffer), info->BufferSize);
+}
+
+int hostMessageBox(const char *text, const char *caption, const char *const *buttons, int count) {
+    Host &h = host();
+    hostLog(std::string("ShioriKrkr: message box: ") + (caption ? caption : "") + ": " + (text ? text : ""));
+    if (!h.message) return 0;
+    return h.message(h.messageContext, text, caption, buttons, count);
+}
+
+// KiriKiri's cursor numbers: 0 the default arrow, -1 (crNone) none, other negatives the
+// system shapes, and numbers krkrsdl3 patch 0001 gives cursor files.
+void hostMouseCursor(tjs_int cursor, const char *storage) {
+    Host &h = host();
+    if (cursor == h.cursor) return;
+    h.cursor = cursor;
+    h.cursorSerial++;
+    if (storage && *storage && !h.cursorFiles.count(cursor)) {
+        auto decoded = std::make_shared<shiorikrkr::DecodedCursor>();
+        try {
+            std::unique_ptr<tTJSBinaryStream> stream(TVPCreateBinaryStreamForRead(ttstr(storage), TJS_N("")));
+            std::vector<uint8_t> bytes(size_t(stream->GetSize()));
+            if (!bytes.empty()) stream->ReadBuffer(bytes.data(), tjs_uint(bytes.size()));
+            if (!shiorikrkr::decodeCursor(bytes.data(), bytes.size(), *decoded)) decoded.reset();
+        } catch (...) {
+            decoded.reset();
+        }
+        hostLog(std::string("ShioriKrkr: cursor ") + storage + (decoded ? "" : " (couldn't decode)"));
+        h.cursorFiles[cursor] = decoded;
+    }
+}
+
+krkrsdl3::iTVPRenderBackend *makePresenter() {
+    auto *presenter = new shiorikrkr::PresenterBackend();
+    host().presenter = presenter;
+    return presenter;
 }
 
 SDL_Window *engineWindow() {
@@ -163,7 +224,13 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
         return SHIORIKRKR_ERROR_ARGUMENTS;
     h.log = config->log;
     h.logContext = config->log_context;
+    h.message = config->message;
+    h.messageContext = config->message_context;
+    h.hostPresents = config->host_presents != 0;
     TVPSetOnLog(deliverLog);
+    TVPHostMessageBox = hostMessageBox;
+    TVPHostMouseCursor = hostMouseCursor;
+    TVPHostRenderBackendFactory = h.hostPresents ? makePresenter : nullptr;
 
     if (config->cx_scheme_path && *config->cx_scheme_path) {
         shiorikrkr::CxScheme scheme;
@@ -174,6 +241,9 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
         }
         h.cx = std::make_unique<shiorikrkr::CxDecryptor>(scheme);
         TVPSetXP3ArchiveExtractionFilter(cxFilter);
+        // Members the archive stores plainly (info flags 0, like its extraction warning) are
+        // read as they are, as GARbro does.
+        TVPXP3FilterOnlyFlaggedMembers = true;
         hostLog("ShioriKrkr: CxDec scheme loaded");
     }
 
@@ -219,12 +289,29 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
     }
     h.started = true;
     h.finished = result == SDL_APP_SUCCESS;
+#if TARGET_OS_IPHONE
+    if (h.hostPresents) {
+        // SDL made its own window over the app's; with the host presenting, nothing shows in it.
+        if (SDL_Window *window = engineWindow()) {
+            UIWindow *uiWindow = (__bridge UIWindow *)SDL_GetPointerProperty(SDL_GetWindowProperties(window),
+                                                                             SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr);
+            uiWindow.hidden = YES;
+        }
+    }
+#endif
     return SHIORIKRKR_OK;
 }
 
 SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
     Host &h = host();
     if (!h.started || h.finished) return 0;
+    // Moves up to and including one button change.
+    while (!h.input.empty()) {
+        Host::PendingInput next = std::move(h.input.front());
+        h.input.pop_front();
+        next.deliver();
+        if (next.button) break;
+    }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         if (SDL_AppEvent(nullptr, &event) != SDL_APP_CONTINUE) h.finished = true;
@@ -260,6 +347,39 @@ SHIORIKRKR_EXPORT void *shiorikrkr_take_view(void) {
 #endif
 }
 
+SHIORIKRKR_EXPORT int shiorikrkr_frame(shiorikrkr_frame_t *frame) {
+    Host &h = host();
+    if (!frame || !h.started || !h.presenter) return 0;
+    shiorikrkr::PresentedFrame presented;
+    if (!h.presenter->frame(presented)) return 0;
+    frame->pixels = presented.pixels;
+    frame->width = presented.width;
+    frame->height = presented.height;
+    frame->pitch = presented.pitch;
+    frame->serial = presented.serial;
+    frame->blank = presented.blank ? 1 : 0;
+    return 1;
+}
+
+SHIORIKRKR_EXPORT uint32_t shiorikrkr_cursor(const uint8_t **rgba, int32_t *width, int32_t *height,
+                                             int32_t *hotX, int32_t *hotY, int32_t *kind) {
+    Host &h = host();
+    int32_t k = h.cursor == -1 ? 2 : 0;
+    const shiorikrkr::DecodedCursor *decoded = nullptr;
+    auto found = h.cursorFiles.find(h.cursor);
+    if (found != h.cursorFiles.end() && found->second) {
+        decoded = found->second.get();
+        k = 1;
+    }
+    if (rgba) *rgba = decoded ? decoded->rgba.data() : nullptr;
+    if (width) *width = decoded ? decoded->width : 0;
+    if (height) *height = decoded ? decoded->height : 0;
+    if (hotX) *hotX = decoded ? decoded->hotX : 0;
+    if (hotY) *hotY = decoded ? decoded->hotY : 0;
+    if (kind) *kind = k;
+    return h.cursorSerial;
+}
+
 SHIORIKRKR_EXPORT void shiorikrkr_canvas_size(int32_t *width, int32_t *height) {
     std::string w, h;
     const bool ok = evaluate("Window.mainWindow !== void ? Window.mainWindow.innerWidth : 0", w) == 0 &&
@@ -272,16 +392,41 @@ SHIORIKRKR_EXPORT void shiorikrkr_pointer(int32_t phase, float x, float y, int32
     if (!host().started) return;
     int px = 0, py = 0;
     windowPoint(x, y, px, py);
+    auto &queue = host().input;
+    const tTVPMouseButton which = mouseButton(button);
+    auto move = [px, py] { krkrsdl3::KRKR_Trig_MouseMove(px, py); };
     switch (phase) {
     case SHIORIKRKR_POINTER_DOWN:
-        krkrsdl3::KRKR_Trig_MouseMove(px, py);
-        krkrsdl3::KRKR_Trig_MouseDown(mouseButton(button), px, py);
+        // The move this tick; the press the next.
+        queue.push_back({true, move});
+        queue.push_back({true, [which, px, py] { krkrsdl3::KRKR_Trig_MouseDown(which, px, py); }});
         break;
     case SHIORIKRKR_POINTER_MOVED:
-        krkrsdl3::KRKR_Trig_MouseMove(px, py);
+        if (queue.empty()) move();
+        else queue.push_back({false, move});
         break;
+    case SHIORIKRKR_POINTER_CANCEL: {
+        // A press still waiting is dropped; one already down comes up off the window.
+        bool dropped = false;
+        for (auto it = queue.rbegin(); it != queue.rend(); ++it) {
+            if (it->button) {
+                queue.erase(std::next(it).base());
+                dropped = true;
+                break;
+            }
+        }
+        if (!dropped)
+            queue.push_back({true, [which] {
+                krkrsdl3::KRKR_Trig_MouseMove(-10000, -10000);
+                krkrsdl3::KRKR_Trig_MouseUp(which, -10000, -10000);
+            }});
+        break;
+    }
     case SHIORIKRKR_POINTER_UP:
-        krkrsdl3::KRKR_Trig_MouseUp(mouseButton(button), px, py);
+        queue.push_back({true, [which, px, py] {
+            krkrsdl3::KRKR_Trig_MouseMove(px, py);
+            krkrsdl3::KRKR_Trig_MouseUp(which, px, py);
+        }});
         break;
     }
 }
@@ -339,7 +484,15 @@ SHIORIKRKR_EXPORT int shiorikrkr_capture(const char *path) {
 SHIORIKRKR_EXPORT void shiorikrkr_stop(void) {
     Host &h = host();
     if (!h.started) return;
-    SDL_AppQuit(nullptr, SDL_APP_SUCCESS);
+    SDL_AppQuit(nullptr, SDL_APP_SUCCESS); // deletes the render backend (the presenter)
+    h.presenter = nullptr;
+    TVPHostRenderBackendFactory = nullptr;
+    TVPHostMessageBox = nullptr;
+    TVPHostMouseCursor = nullptr;
+    h.cursorFiles.clear();
+    h.input.clear();
+    h.cursor = 0;
+    TVPXP3FilterOnlyFlaggedMembers = false;
     TVPSetXP3ArchiveExtractionFilter(nullptr);
     TVPSetOnLog(nullptr);
     h.cx.reset();

@@ -8,3 +8,5 @@ _shiorikrkr_key
 _shiorikrkr_eval
 _shiorikrkr_capture
 _shiorikrkr_stop
+_shiorikrkr_frame
+_shiorikrkr_cursor

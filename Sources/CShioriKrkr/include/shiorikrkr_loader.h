@@ -27,6 +27,9 @@ typedef struct shiorikrkr_api {
     int (*eval)(const char *expression, char *out, uint32_t capacity);
     int (*capture)(const char *path);
     void (*stop)(void);
+    int (*frame)(shiorikrkr_frame_t *frame);
+    uint32_t (*cursor)(const uint8_t **rgba, int32_t *width, int32_t *height, int32_t *hot_x, int32_t *hot_y,
+                       int32_t *kind);
 } shiorikrkr_api_t;
 
 /* Loads the framework binary at path (once per process) and returns its functions, or NULL

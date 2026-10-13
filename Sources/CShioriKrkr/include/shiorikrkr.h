@@ -21,10 +21,17 @@
 extern "C" {
 #endif
 
-#define SHIORIKRKR_API_VERSION 1
+#define SHIORIKRKR_API_VERSION 2
 
 /* One line of the engine's log (UTF-8, no newline). */
 typedef void (*shiorikrkr_log_fn)(void *context, const char *line);
+
+/* A message box the game shows (System.inform, a question): the host shows it its own way
+ * and returns the index of the button chosen, or -1. Called on the engine's thread, inside a
+ * tick; the host waits for the answer (a nested run loop) before returning. NULL: answered
+ * with the first button. */
+typedef int32_t (*shiorikrkr_message_fn)(void *context, const char *text, const char *caption,
+                                         const char *const *buttons, int32_t button_count);
 
 typedef struct shiorikrkr_config {
     uint32_t struct_size;            /* sizeof(shiorikrkr_config_t) */
@@ -44,6 +51,12 @@ typedef struct shiorikrkr_config {
     uint32_t argument_count;
     shiorikrkr_log_fn log;
     void *log_context;
+    /* Since API version 2. */
+    shiorikrkr_message_fn message;
+    void *message_context;
+    /* Non-zero: frames stay with the host (shiorikrkr_frame) and SDL draws nothing; zero:
+     * SDL's own renderer draws into the engine view (the spike's path). */
+    int32_t host_presents;
 } shiorikrkr_config_t;
 
 enum {
@@ -67,13 +80,34 @@ int shiorikrkr_tick(void);
  * hidden once the host has taken the view. */
 void *shiorikrkr_take_view(void);
 
+/* The game's composed frame, for the host to present: RGBA8, top row first. The pixels stay
+ * valid until the next tick. serial changes when they do; blank is set while every sampled
+ * pixel is black (the game's first frames, before its title draws). Returns 1 when there is a
+ * frame. Only with host_presents. */
+typedef struct shiorikrkr_frame {
+    const uint8_t *pixels;
+    int32_t width, height, pitch;
+    uint64_t serial;
+    int32_t blank;
+} shiorikrkr_frame_t;
+int shiorikrkr_frame(shiorikrkr_frame_t *frame);
+
+/* The game's cursor, for the host to draw at the pointer: kind 0 the system pointer, 1 the
+ * game's image (RGBA, straight alpha, top row first, valid until the cursor changes; hot is
+ * its hotspot in the image's pixels), 2 hidden. Returns a serial that changes with it. */
+uint32_t shiorikrkr_cursor(const uint8_t **rgba, int32_t *width, int32_t *height, int32_t *hot_x,
+                           int32_t *hot_y, int32_t *kind);
+
 /* The game's canvas size (the main window's inner size), 0x0 before the first window. */
 void shiorikrkr_canvas_size(int32_t *width, int32_t *height);
 
 /* Pointer input in the engine view's normalized coordinates (0...1 on each axis, the
- * engine letterboxes the canvas inside it). phase: 0 down, 1 moved, 2 up. button: 0 left,
+ * engine letterboxes the canvas inside it). phase: 0 down, 1 moved, 2 up, 3 cancel (the press
+ * ends without a click). Presses reach the game a tick after the pointer moves there and are
+ * held at least a tick, as KAG's buttons need. button: 0 left,
  * 1 right, 2 middle. A tap is down + up at one point: a left click. */
-enum { SHIORIKRKR_POINTER_DOWN = 0, SHIORIKRKR_POINTER_MOVED = 1, SHIORIKRKR_POINTER_UP = 2 };
+enum { SHIORIKRKR_POINTER_DOWN = 0, SHIORIKRKR_POINTER_MOVED = 1, SHIORIKRKR_POINTER_UP = 2,
+       SHIORIKRKR_POINTER_CANCEL = 3 /* a gesture took the touch: no click */ };
 enum { SHIORIKRKR_BUTTON_LEFT = 0, SHIORIKRKR_BUTTON_RIGHT = 1, SHIORIKRKR_BUTTON_MIDDLE = 2 };
 void shiorikrkr_pointer(int32_t phase, float x, float y, int32_t button);
 
