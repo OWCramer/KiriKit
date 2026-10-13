@@ -635,6 +635,35 @@ index 514308b..1c3ea09 100644
      } while(false);
      if(TVPFontNames.GetCount() > 0) {
          // set default fontface name
+diff --git a/cpp/core/visual/GraphicsLoaderIntf.cpp b/cpp/core/visual/GraphicsLoaderIntf.cpp
+index 233fdd5..3ec914f 100644
+--- a/cpp/core/visual/GraphicsLoaderIntf.cpp
++++ b/cpp/core/visual/GraphicsLoaderIntf.cpp
+@@ -1875,9 +1875,24 @@ void TVPLoadGraphicProvince(tTVPBaseBitmap *dest, const ttstr &name,
+ //---------------------------------------------------------------------------
+ // TVPLoadGraphic (to texture), return size
+ //---------------------------------------------------------------------------
++#ifdef SHIORIKRKR
++// Shiori: time spent loading images (the host's profile names slow ticks with it).
++#include <chrono>
++double TVPShioriImageLoadSeconds = 0;
++struct tTVPShioriLoadTimer {
++    std::chrono::steady_clock::time_point Start = std::chrono::steady_clock::now();
++    ~tTVPShioriLoadTimer() {
++        TVPShioriImageLoadSeconds +=
++            std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
++    }
++};
++#endif
+ int TVPLoadGraphic(iTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
+                    tjs_uint desw, tjs_uint desh, tTVPGraphicLoadMode mode,
+                    ttstr *provincename, iTJSDispatch2 **metainfo) {
++#ifdef SHIORIKRKR
++    tTVPShioriLoadTimer shioriLoadTimer;
++#endif
+     // loading with cache management
+     ttstr nname = TVPNormalizeStorageName(name);
+     tjs_uint32 hash;
 diff --git a/cpp/core/visual/RenderManager.cpp b/cpp/core/visual/RenderManager.cpp
 index 5feb515..cd7cb90 100644
 --- a/cpp/core/visual/RenderManager.cpp

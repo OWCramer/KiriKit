@@ -52,6 +52,8 @@ extern char **_argv;
 extern bool TVPTerminated;
 static double profileFrameWait = 0; // seconds frame() waited for the GPU since the last profile line
 extern double TVPShioriRenderSeconds;
+extern double TVPShioriImageLoadSeconds;
+double ShioriEmoteLoadSeconds = 0;
 extern unsigned TVPShioriRenderCalls;
 double ShioriEmoteDrawSeconds = 0;
 
@@ -341,15 +343,20 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
         profileTick += took;
         profileWorst = std::max(profileWorst, took);
         // A tick long enough to drop a frame: what it spent its time on.
-        static double lastEmote = 0, lastRender = 0;
+        static double lastEmote = 0, lastRender = 0, lastImages = 0, lastModels = 0;
         if (took > 0.020) {
-            char line[200];
-            snprintf(line, sizeof line, "ShioriKrkr slow tick: %.1f ms (E-mote %.1f ms, software layer ops %.1f ms)", took * 1000,
+            char line[240];
+            snprintf(line, sizeof line,
+                     "ShioriKrkr slow tick: %.1f ms (images loaded %.1f ms, E-mote models loaded %.1f ms, E-mote drawn %.1f ms, "
+                     "software layer ops %.1f ms)",
+                     took * 1000, (TVPShioriImageLoadSeconds - lastImages) * 1000, (ShioriEmoteLoadSeconds - lastModels) * 1000,
                      (ShioriEmoteDrawSeconds - lastEmote) * 1000, (TVPShioriRenderSeconds - lastRender) * 1000);
             hostLog(line);
         }
         lastEmote = ShioriEmoteDrawSeconds;
         lastRender = TVPShioriRenderSeconds;
+        lastImages = TVPShioriImageLoadSeconds;
+        lastModels = ShioriEmoteLoadSeconds;
         if (++profileTicks == 300) {
             char line[256];
             snprintf(line, sizeof line,
@@ -367,6 +374,8 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
             TVPShioriRenderCalls = 0;
             ShioriEmoteDrawSeconds = 0;
             lastEmote = lastRender = 0;
+            lastImages = TVPShioriImageLoadSeconds;
+            lastModels = ShioriEmoteLoadSeconds;
         }
     }
     if (shiori::exitRequested() || ::Application->IsTarminate()) h.finished = true;

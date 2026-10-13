@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <chrono>
 extern double ShioriEmoteDrawSeconds;
+extern double ShioriEmoteLoadSeconds;
 #include <cstring>
 #include <map>
 #include <memory>
@@ -117,6 +118,11 @@ public:
             order_.push_back(key);
             return found->second.info;
         }
+        const auto loadStart = std::chrono::steady_clock::now();
+        struct LoadTimer {
+            std::chrono::steady_clock::time_point start;
+            ~LoadTimer() { ShioriEmoteLoadSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(); }
+        } loadTimer{loadStart};
         Resource r;
         std::vector<uint8_t> bytes;
         std::string error;

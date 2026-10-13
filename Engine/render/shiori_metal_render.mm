@@ -320,7 +320,7 @@ Texture *ours(iTVPTexture2D *t) { return dynamic_cast<Texture *>(t); }
 // Operations: each of krkr2's software methods, wrapped. Parameters go on to the software
 // method (which the CPU path runs) and are kept here for the kernel.
 
-enum class Shape { None, Blt, BltAndOpa, BltWithOpa, SD, Fill, Univ };
+enum class Shape { None, Blt, BltAndOpa, BltWithOpa, SD, Fill, Univ, Blur };
 
 struct Kind {
     Shape shape;
@@ -357,6 +357,8 @@ Kind kindOf(const std::string &name) {
         {"UnivTransBlend", {Shape::Univ, OpUniv, 0}},
         {"UnivTransBlend_d", {Shape::Univ, OpUnivD, 0}},
         {"UnivTransBlend_a", {Shape::Univ, OpUnivA, 0}},
+        {"BoxBlur", {Shape::Blur, OpBoxBlurRows, 0}},
+        {"BoxBlurAlpha", {Shape::Blur, OpBoxBlurRows, 0}},
     };
     auto it = kinds.find(name);
     return it == kinds.end() ? Kind{Shape::None, 0, 0} : it->second;
@@ -371,6 +373,7 @@ public:
         IdColor = inner->EnumParameterID("color");
         IdPhase = inner->EnumParameterID("phase");
         IdVague = inner->EnumParameterID("vague");
+        for (int i = 0; i < 4; ++i) IdArea[i] = inner->EnumParameterID(kAreaNames[i]);
     }
 
     iTVPRenderMethod *Inner;
@@ -379,12 +382,15 @@ public:
     uint32_t Color = 0;
     int Phase = 0, Vague = 0;
     uint32_t Table[256] = {};
+    int Area[4] = {}; // a box blur's area: left, top, right, bottom
 
     int EnumParameterID(const char *name) override { return Inner->EnumParameterID(name); }
     void SetParameterUInt(int id, unsigned int v) override { Inner->SetParameterUInt(id, v); }
     void SetParameterInt(int id, int v) override {
         Inner->SetParameterInt(id, v);
         if (id < 0) return;
+        for (int i = 0; i < 4; ++i)
+            if (id == IdArea[i]) Area[i] = v;
         if (id == IdPhase) {
             Phase = v;
             InitTable(); // with the vague given before, as the software method does
@@ -410,7 +416,8 @@ public:
     bool IsBlendTarget() override { return Inner->IsBlendTarget(); }
 
 private:
-    int IdOpa, IdColor, IdPhase, IdVague;
+    static constexpr const char *kAreaNames[4] = {"area_left", "area_top", "area_right", "area_bottom"};
+    int IdOpa, IdColor, IdPhase, IdVague, IdArea[4];
 
     // The universal transition's level table (KiriKiri's: full below phase - vague, none from
     // phase, a ramp between).
@@ -573,6 +580,13 @@ public:
             return;
         }
         bool onGPU = m && TryWarp(m, nTriangles, target, rcclip, pttar, textures);
+        if (!onGPU && getenv("SHIORIKRKR_TRACE_WARP")) {
+            static int traced = 0;
+            if (traced++ < 10)
+                fprintf(stderr, "warp: on the CPU: %s (ours %d) n=%d target ours %d source ours %d\n", method->GetName().c_str(),
+                        m != nullptr, nTriangles, ours(target) != nullptr,
+                        textures.size() ? ours(textures[0].first) != nullptr : -1);
+        }
         if (!onGPU) {
             IdleAll(target, reftar, textures);
             Software->OperateTriangles(Unwrap(method), nTriangles, target, reftar, rcclip, pttar, textures);
@@ -597,12 +611,12 @@ private:
     int StretchTypeId = -1;
     int StretchType = 0;
 
-    // The kernel's sampling for the current stretch type: nearest (1/3) or bilinear (2/4);
-    // 0 for what stays on the CPU (cubic; area when shrinking, for stretches).
+    // The kernel's sampling for the current stretch type: nearest (1/3), bilinear (2/4) or
+    // area (5, stretches that shrink); 0 for what stays on the CPU (cubic).
     int SampleMode(bool warp, bool shrinking) const {
         switch (StretchType) {
         case 0: return warp ? 1 : 3;
-        case 1: return warp ? 2 : (shrinking ? 0 : 4); // area: bilinear unless both shrink
+        case 1: return warp ? 2 : (shrinking ? 5 : 4); // area: averaged when both shrink
         case 2: return warp ? 2 : 4;
         default: return 0;
         }
@@ -650,6 +664,42 @@ private:
         if (m->K.shape == Shape::BltAndOpa && m->Opa != 255) p.op = m->K.opOpa;
         Dispatch(p, tar, src, nullptr, nullptr, nullptr);
     }
+
+    // A box blur (krkr2's software path: a box filter of the source rectangle into the target
+    // one, edges reflected; in place when they're the same).
+    bool TryBlur(Method *m, Texture *tar, const tTVPRect &rctar, const tRenderTexRectArray &textures) {
+        if (textures.size() != 1) return false;
+        Texture *src = ours(textures[0].first);
+        const tTVPRect &rs = textures[0].second;
+        if (!src || src->BytesPerPixel() != 4 || tar->BytesPerPixel() != 4 || !SameSize(rs, rctar) || !Inside(rs, src) ||
+            !Inside(rctar, tar))
+            return false;
+        if (src == tar && !(rs == rctar) && Overlap(rs, rctar)) return false;
+        const int w = rctar.get_width(), h = rctar.get_height();
+        if (w <= 0 || h <= 0) return true;
+        const int kw = m->Area[2] - m->Area[0] + 1, kh = m->Area[3] - m->Area[1] + 1;
+        if (kw <= 0 || kh <= 0 || kw > 1024 || kh > 1024) return false;
+        Device &g = gpu();
+        std::lock_guard<std::recursive_mutex> lock(g.mutex);
+        const size_t need = size_t(w) * h * 16;
+        if (!BlurTemp || BlurTemp.length < need)
+            BlurTemp = [g.device newBufferWithLength:need options:MTLResourceStorageModePrivate];
+        KernelParams p = {};
+        p.width = unsigned(w);
+        p.height = unsigned(h);
+        p.tarPitch = unsigned(tar->GetPitch() / 4);
+        p.tarOffset = unsigned(rctar.top) * p.tarPitch + unsigned(rctar.left);
+        p.srcPitch = unsigned(src->GetPitch() / 4);
+        p.srcOffset = unsigned(rs.top) * p.srcPitch + unsigned(rs.left);
+        p.matrix[0] = float(kw);
+        p.matrix[1] = float(kh);
+        p.op = OpBoxBlurRows;
+        Dispatch(p, tar, src, nullptr, nullptr, nullptr, BlurTemp);
+        p.op = OpBoxBlurColumns;
+        Dispatch(p, tar, src, nullptr, nullptr, nullptr, BlurTemp);
+        return true;
+    }
+    id<MTLBuffer> BlurTemp = nil;
 
     // A stretched blend (krkr2's software path: clip to the target, move the source edges in
     // proportion, resize, blend), on the GPU where the stretch type allows.
@@ -728,14 +778,26 @@ private:
                 if (rcdest.right < dstrect.right) refrect.right -= (float)rw / dw * (dstrect.right - rcdest.right);
                 if (rcdest.top > dstrect.top) refrect.top += (float)rh / dh * (rcdest.top - dstrect.top);
                 if (rcdest.bottom < dstrect.bottom) refrect.bottom -= (float)rh / dh * (dstrect.bottom - rcdest.bottom);
+                bool done;
                 if (SameSize(refrect, rcdest)) {
                     tRenderTexRectArray::Element one[] = {tRenderTexRectArray::Element(src, refrect)};
-                    return TryGPU(m, tar, rcdest, tRenderTexRectArray(one));
+                    done = TryGPU(m, tar, rcdest, tRenderTexRectArray(one));
+                } else {
+                    done = TryStretch(m, tar, rcdest, src, refrect);
                 }
-                return TryStretch(m, tar, rcdest, src, refrect);
+                if (!done && getenv("SHIORIKRKR_TRACE_WARP"))
+                    fprintf(stderr, "warp: rect %d,%d,%d,%d from %d,%d,%d,%d (src %ux%u) stretch %d stays on the CPU\n", rcdest.left,
+                            rcdest.top, rcdest.right, rcdest.bottom, refrect.left, refrect.top, refrect.right, refrect.bottom,
+                            src->GetWidth(), src->GetHeight(), StretchType);
+                return done;
             }
         }
-        if (!Inside(rcclip, tar) || rcclip.get_width() <= 0 || rcclip.get_height() <= 0) return false;
+        if (!Inside(rcclip, tar) || rcclip.get_width() <= 0 || rcclip.get_height() <= 0) {
+            if (getenv("SHIORIKRKR_TRACE_WARP"))
+                fprintf(stderr, "warp: clip %d,%d,%d,%d outside the target %ux%u\n", rcclip.left, rcclip.top, rcclip.right,
+                        rcclip.bottom, tar->GetWidth(), tar->GetHeight());
+            return false;
+        }
         // upper-left, upper-right, bottom-right, bottom-left
         cv::Point2f ps[] = {cv::Point2f(srcpt[0].x, srcpt[0].y), cv::Point2f(srcpt[1].x + 1, srcpt[1].y),
                             cv::Point2f(srcpt[5].x + 1, srcpt[5].y + 1), cv::Point2f(srcpt[2].x, srcpt[2].y + 1)};
@@ -812,6 +874,8 @@ private:
         tTVPRect rs, rd, rr;
         size_t n = textures.size();
         switch (k.shape) {
+        case Shape::Blur:
+            return TryBlur(m, tar, rctar, textures);
         case Shape::Fill:
             if (n != 0) return false;
             break;
@@ -909,7 +973,8 @@ private:
         return true;
     }
 
-    void Dispatch(const KernelParams &p, Texture *tar, Texture *src, Texture *dst, Texture *rule, const uint32_t *table) {
+    void Dispatch(const KernelParams &p, Texture *tar, Texture *src, Texture *dst, Texture *rule, const uint32_t *table,
+                  id<MTLBuffer> temp = nil) {
         Device &g = gpu();
         std::lock_guard<std::recursive_mutex> lock(g.mutex);
         g.ensureTables();
@@ -926,6 +991,7 @@ private:
         static const uint32_t none[256] = {};
         [e setBytes:table ? table : none length:sizeof(none) atIndex:7];
         [e setBuffer:t offset:0 atIndex:8];
+        [e setBuffer:temp ? temp : t offset:0 atIndex:9];
         [e dispatchThreads:MTLSizeMake(p.width, p.height, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
         tar->MarkUsed(serial);
         if (src) src->MarkUsed(serial);

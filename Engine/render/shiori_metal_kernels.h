@@ -23,6 +23,7 @@ enum Op : unsigned {
     OpFillARGB = 50, OpFillARGB8, OpFillColor, OpFillMask, OpConstColorAlpha, OpConstColorAlphaD,
     OpConstColorAlphaA, OpRemoveConstOpacity,
     OpUniv = 60, OpUnivSwitch, OpUnivD, OpUnivSwitchD, OpUnivA, OpUnivSwitchA,
+    OpBoxBlurRows = 70, OpBoxBlurColumns, // a box blur's two passes (sums through the temp buffer)
 };
 
 // Parameters, laid out the same in C++ and MSL. Offsets and pitches count elements (32-bit
@@ -37,7 +38,8 @@ struct KernelParams {
     unsigned opa, color;
     int src1lv, src2lv;
     // A sampled source (stretches and warps; 0 reads src as it lies): 1 warp, nearest; 2 warp,
-    // bilinear; 3 stretch, nearest; 4 stretch, bilinear. The source is the srcWidth x srcHeight
+    // bilinear; 3 stretch, nearest; 4 stretch, bilinear; 5 stretch, area (shrinking). The
+    // source is the srcWidth x srcHeight
     // view at srcOffset; outside it pixels are 0.
     unsigned sample;
     int srcWidth, srcHeight;
@@ -163,9 +165,36 @@ static inline uint sampled(device const uint *src, constant KernelParams &p, uin
         float sy = clamp(floor(y * p.matrix[1]), 0.0f, float(p.srcHeight - 1));
         return fetch(src, p, int(sx), int(sy));
     }
+    if (p.sample == 5) {
+        // Shrinking by area: the average over the target pixel's footprint, partial pixels
+        // weighted by how much of them it covers.
+        float y0 = y * p.matrix[1], y1 = min((y + 1) * p.matrix[1], float(p.srcHeight));
+        float x0 = x * p.matrix[0], x1 = min((x + 1) * p.matrix[0], float(p.srcWidth));
+        float4 sum = 0;
+        float area = 0;
+        for (int py = int(y0); py < int(ceil(y1)); ++py) {
+            float wy = min(float(py + 1), y1) - max(float(py), y0);
+            for (int px = int(x0); px < int(ceil(x1)); ++px) {
+                float w = wy * (min(float(px + 1), x1) - max(float(px), x0));
+                uint c = src[p.srcOffset + uint(py) * p.srcPitch + uint(px)];
+                sum += w * float4(c & 0xffu, (c >> 8) & 0xffu, (c >> 16) & 0xffu, c >> 24);
+                area += w;
+            }
+        }
+        if (area <= 0) return 0;
+        uint4 v = uint4(clamp(floor(sum / area + 0.5f), 0.0f, 255.0f));
+        return v.x | (v.y << 8) | (v.z << 16) | (v.w << 24);
+    }
     float sx = clamp((x + 0.5f) * p.matrix[0] - 0.5f, 0.0f, float(p.srcWidth - 1));
     float sy = clamp((y + 0.5f) * p.matrix[1] - 0.5f, 0.0f, float(p.srcHeight - 1));
     return bilinear(src, p, sx, sy);
+}
+
+// Reflect-101 edges (… 2 1 | 0 1 2 … n-2 n-1 | n-2 …).
+static inline int reflect101(int i, int n) {
+    if (n == 1) return 0;
+    while (i < 0 || i >= n) i = i < 0 ? -i : 2 * n - 2 - i;
+    return i;
 }
 
 kernel void shioriLayerOp(device uint *tar [[buffer(0)]],
@@ -177,8 +206,31 @@ kernel void shioriLayerOp(device uint *tar [[buffer(0)]],
                           device const uchar *negmul [[buffer(6)]],
                           constant uint *table [[buffer(7)]],
                           device uchar *tar8 [[buffer(8)]],
+                          device uint4 *temp [[buffer(9)]],
                           uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= p.width || gid.y >= p.height) return;
+    if (p.op == 70 || p.op == 71) {
+        // Box blur (a box of matrix[0] x matrix[1] pixels about each, edges reflected): sums
+        // along the rows of the source into temp, then down its columns into the target.
+        int kw = int(p.matrix[0]), kh = int(p.matrix[1]);
+        int w = int(p.width), h = int(p.height);
+        int x = int(gid.x), y = int(gid.y);
+        uint4 sum = 0;
+        if (p.op == 70) {
+            for (int k = 0; k < kw; ++k) {
+                int sx = reflect101(x - kw / 2 + k, w);
+                uint c = src[p.srcOffset + uint(y) * p.srcPitch + uint(sx)];
+                sum += uint4(c & 0xffu, (c >> 8) & 0xffu, (c >> 16) & 0xffu, c >> 24);
+            }
+            temp[gid.y * p.width + gid.x] = sum;
+            return;
+        }
+        for (int k = 0; k < kh; ++k) sum += temp[uint(reflect101(y - kh / 2 + k, h)) * p.width + gid.x];
+        float4 v = clamp(floor(float4(sum) / float(kw * kh) + 0.5f), 0.0f, 255.0f);
+        uint4 b = uint4(v);
+        tar[p.tarOffset + gid.y * p.tarPitch + gid.x] = b.x | (b.y << 8) | (b.z << 16) | (b.w << 24);
+        return;
+    }
     uint ti = p.tarOffset + gid.y * p.tarPitch + gid.x;
     uint si = p.srcOffset + gid.y * p.srcPitch + gid.x;
     uint di = p.dstOffset + gid.y * p.dstPitch + gid.x;
