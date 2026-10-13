@@ -1094,7 +1094,7 @@ index 10850e9..2ea7786 100644
  public:
      void Set();
 diff --git a/cpp/core/visual/FontImpl.cpp b/cpp/core/visual/FontImpl.cpp
-index 514308b..dd64939 100644
+index 514308b..7902c63 100644
 --- a/cpp/core/visual/FontImpl.cpp
 +++ b/cpp/core/visual/FontImpl.cpp
 @@ -15,7 +15,9 @@
@@ -1107,7 +1107,57 @@ index 514308b..dd64939 100644
  #include "StorageImpl.h"
  #include "BinaryStream.h"
  
-@@ -175,8 +177,16 @@ extern std::vector<ttstr> Android_GetExternalStoragePath();
+@@ -95,6 +97,13 @@ static int TVPInternalEnumFonts(
+                     case TT_MS_LANGID_KOREAN_EXTENDED_WANSUNG_KOREA:
+                     case TT_MS_LANGID_KOREAN_JOHAB_KOREA:
+                         break;
++#ifdef SHIORIKRKR
++                    // Shiori: the English names too, as Windows matches a face by any of its
++                    // names (NEKOPARA asks for "Source Han Sans CN Medium", whose CJK name is
++                    // "思源黑体 CN Medium"; without it, the fallback font drew the story text).
++                    case TT_MS_LANGID_ENGLISH_UNITED_STATES:
++                        break;
++#endif
+                     default:
+                         continue;
+                 }
+@@ -115,11 +124,24 @@ static int TVPInternalEnumFonts(
+                 info.Path = FontPath;
+                 info.Index = j;
+                 info.Getter = getter;
++#ifdef SHIORIKRKR
++                if(getenv("SHIORIKRKR_TRACE_FONT"))
++                    TVPAddLog(ttstr(TJS_W("Shiori font name: ")) + fontname + TJS_W(" = ") + FontPath + TJS_W(" style ") + ttstr(fontface->style_name ? fontface->style_name : ""));
++#endif
++#ifdef SHIORIKRKR
++                // A name a regular weight already has keeps it (a family's Regular and Bold
++                // files share their name; Windows picks the regular one for it).
++                if(!TVPFontNames.Find(fontname) || !(fontface->style_flags & FT_STYLE_FLAG_BOLD))
++#endif
+                 TVPFontNames.Add(fontname, info);
+                 addCount = 1;
+             }
+             /*if (!addCount)*/ {
+                 ttstr fontname((tjs_nchar *)fontface->family_name);
++#ifdef SHIORIKRKR
++                if(getenv("SHIORIKRKR_TRACE_FONT"))
++                    TVPAddLog(ttstr(TJS_W("Shiori font family: ")) + fontname + TJS_W(" = ") + FontPath + TJS_W(" style ") + ttstr(fontface->style_name ? fontface->style_name : ""));
++#endif
+                 TVPFontNamePathInfo info;
+                 info.Path = FontPath;
+                 info.Index = i;
+@@ -158,6 +180,10 @@ int TVPEnumFontsProc(const ttstr &FontPath) {
+ 
+ tTJSBinaryStream *TVPCreateFontStream(const ttstr &fontname) {
+     TVPFontNamePathInfo *info = TVPFindFont(fontname);
++#ifdef SHIORIKRKR
++    if(getenv("SHIORIKRKR_TRACE_FONT"))
++        TVPAddLog(ttstr(TJS_W("Shiori font: ")) + fontname + TJS_W(" -> ") + (info ? info->Path + TJS_W(" #") + ttstr((tjs_int)info->Index) : ttstr(TJS_W("(default)"))));
++#endif
+     if(!info) {
+         info = TVPFontNames.Find(TVPDefaultFontName);
+         if(!info)
+@@ -175,8 +201,16 @@ extern std::vector<ttstr> Android_GetExternalStoragePath();
  extern ttstr Android_GetInternalStoragePath();
  extern ttstr Android_GetApkStoragePath();
  #endif
@@ -1125,7 +1175,7 @@ index 514308b..dd64939 100644
      // enumlate all fonts
      if(TVPFontNamesInit)
          return;
-@@ -218,6 +228,7 @@ void TVPInitFontNames() {
+@@ -218,6 +252,7 @@ void TVPInitFontNames() {
              break;
  #endif
  
@@ -1133,7 +1183,7 @@ index 514308b..dd64939 100644
          { // from internal storage
              auto data = cocos2d::FileUtils::getInstance()->getDataFromFile(
                  "NotoSansCJK-Regular.ttc");
-@@ -238,6 +249,7 @@ void TVPInitFontNames() {
+@@ -238,6 +273,7 @@ void TVPInitFontNames() {
                     }))
                  break;
          }

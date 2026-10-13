@@ -190,9 +190,10 @@ public:
         if (traceText() && !chars_.empty()) {
             std::string text;
             for (const Char &c : chars_) text += ttstr(c.text.c_str()).AsStdString();
-            fprintf(stderr, "textrender done: box %dx%d size %d valign %d: '%s' first y %.1f size %d, bounds %d,%d-%d,%d\n",
+            fprintf(stderr, "textrender done: box %dx%d size %d valign %d: '%s' first y %.1f size %d face %s bold %d, bounds %d,%d-%d,%d\n",
                     int(boxWidth_), int(boxHeight_), int(default_.fontSize), int(default_.valign), text.substr(0, 40).c_str(),
-                    chars_[0].y, int(chars_[0].size), bounds(0), bounds(1), bounds(2), bounds(3));
+                    chars_[0].y, int(chars_[0].size), ttstr(chars_[0].face.c_str()).AsStdString().c_str(), int(chars_[0].bold),
+                    bounds(0), bounds(1), bounds(2), bounds(3));
         }
     }
 

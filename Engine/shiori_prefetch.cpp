@@ -37,7 +37,7 @@ bool TVPShioriGraphicCached(const ttstr &nname);
 
 namespace {
 
-constexpr size_t kAhead = 2;          // pictures decoded ahead of the last one loaded
+constexpr size_t kAhead = 3;          // pictures decoded ahead of the last one loaded
 constexpr size_t kWindow = 80;        // names looked through after it
 constexpr size_t kResolvesPerCall = 24; // names checked against storage per load (the engine thread)
 constexpr size_t kScenarios = 6;      // scenarios remembered (the newest is searched first)

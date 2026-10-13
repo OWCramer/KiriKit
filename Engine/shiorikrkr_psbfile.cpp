@@ -171,7 +171,35 @@ private:
         return true;
     }
 
-    ttstr string(uint64_t index) const {
+    // Each string and key decoded once (scenario files repeat them thousands of times; decoding
+    // and building them again for every use was most of a 70 ms parse).
+    ttstr string(uint64_t index) {
+        if (index >= stringOffsets_.size()) return ttstr();
+        if (stringCache_.size() != stringOffsets_.size()) {
+            stringCache_.assign(stringOffsets_.size(), ttstr());
+            stringDone_.assign(stringOffsets_.size(), false);
+        }
+        if (!stringDone_[size_t(index)]) {
+            stringCache_[size_t(index)] = decodeString(index);
+            stringDone_[size_t(index)] = true;
+        }
+        return stringCache_[size_t(index)];
+    }
+    ttstr &key(size_t index) {
+        if (keyCache_.size() != names_.size()) {
+            keyCache_.assign(names_.size(), ttstr());
+            keyDone_.assign(names_.size(), false);
+        }
+        if (!keyDone_[index]) {
+            keyCache_[index] = ttstr(names_[index].c_str());
+            keyDone_[index] = true;
+        }
+        return keyCache_[index];
+    }
+    std::vector<ttstr> stringCache_, keyCache_;
+    std::vector<bool> stringDone_, keyDone_;
+
+    ttstr decodeString(uint64_t index) const {
         if (index >= stringOffsets_.size()) return ttstr();
         const size_t start = stringData_ + stringOffsets_[size_t(index)];
         size_t end = start;
@@ -263,8 +291,8 @@ private:
                 tTJSVariant v;
                 ok = value(q + offsets[i], v, depth + 1);
                 if (ok) {
-                    ttstr key(names_[size_t(keys[i])].c_str());
-                    dict->PropSet(TJS_MEMBERENSURE, key.c_str(), nullptr, &v, dict);
+                    ttstr &name = key(size_t(keys[i]));
+                    dict->PropSet(TJS_MEMBERENSURE, name.c_str(), name.GetHint(), &v, dict);
                 }
             }
             out = tTJSVariant(dict, dict);
