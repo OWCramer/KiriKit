@@ -788,8 +788,26 @@ static tjs_error ShioriTextRenderFactory(ShioriTextRender **result, tjs_int coun
 
 #define SHIORI_TR_PROPERTY(name) NCB_PROPERTY(name, get_##name, set_##name)
 
+// textrender.dll 2.x's link regions (in-text cross references; JAPANESE SCHOOL LIFE's tips ask
+// for them). The link markup isn't known, so no text makes links: an empty list, no rectangles
+// (the user's design from his AetherKrkr patch 0016).
+static tjs_error ShioriTextRenderLinkNames(tTJSVariant *result, tjs_int, tTJSVariant **, ShioriTextRender *) {
+    if (result) {
+        iTJSDispatch2 *array = TJSCreateArrayObject();
+        *result = tTJSVariant(array, array);
+        array->Release();
+    }
+    return TJS_S_OK;
+}
+static tjs_error ShioriTextRenderLinkRects(tTJSVariant *result, tjs_int, tTJSVariant **, ShioriTextRender *) {
+    if (result) result->Clear();
+    return TJS_S_OK;
+}
+
 NCB_REGISTER_CLASS_DIFFER(TextRenderBase, ShioriTextRender) {
     RawCallback(ShioriTextRenderFactory);
+    RawCallback("getLinkNames", &ShioriTextRenderLinkNames, 0);
+    RawCallback("getLinkRects", &ShioriTextRenderLinkRects, 0);
     NCB_METHOD(render);
     NCB_METHOD(setRenderSize);
     NCB_METHOD(setDefault);

@@ -14,10 +14,11 @@
 // check word follows. Behaviour notes in PROVENANCE.md (the format was learnt by reading
 // Aether's decoder for guidance; this is Shiori's own implementation).
 #include "tjsCommHead.h"
-#include "ncbind/ncbind.hpp"
+#include <ncbind.hpp>
 #include "tjsArray.h"
 #include "tjsDictionary.h"
-#include "TVPStorage.h"
+#include "StorageIntf.h"
+#include "MsgIntf.h"
 
 #include <algorithm>
 #include <array>
@@ -29,7 +30,7 @@
 
 #include "shiorikrkr_emote.h"
 
-#define NCB_MODULE_NAME TJS_N("PackinOne.dll")
+#define NCB_MODULE_NAME TJS_W("PackinOne.dll")
 
 namespace {
 
@@ -363,34 +364,9 @@ private:
     ttstr string() {
         const uint32_t n = u32();
         need(size_t(n) * 2);
-        // UTF-16 in the pack; TJS strings here are UTF-8.
-        std::string s;
-        s.reserve(n);
-        for (uint32_t i = 0; i < n; ++i) {
-            uint32_t c = uint32_t(b_[at_ + i * 2] | b_[at_ + i * 2 + 1] << 8);
-            if (c >= 0xD800 && c < 0xDC00 && i + 1 < n) {
-                const uint32_t low = uint32_t(b_[at_ + i * 2 + 2] | b_[at_ + i * 2 + 3] << 8);
-                if (low >= 0xDC00 && low < 0xE000) {
-                    c = 0x10000 + ((c - 0xD800) << 10) + (low - 0xDC00);
-                    ++i;
-                }
-            }
-            if (c < 0x80) {
-                s += char(c);
-            } else if (c < 0x800) {
-                s += char(0xC0 | c >> 6);
-                s += char(0x80 | (c & 63));
-            } else if (c < 0x10000) {
-                s += char(0xE0 | c >> 12);
-                s += char(0x80 | (c >> 6 & 63));
-                s += char(0x80 | (c & 63));
-            } else {
-                s += char(0xF0 | c >> 18);
-                s += char(0x80 | (c >> 12 & 63));
-                s += char(0x80 | (c >> 6 & 63));
-                s += char(0x80 | (c & 63));
-            }
-        }
+        // UTF-16 in the pack, as TJS strings are.
+        std::u16string s(n, u'\0');
+        for (uint32_t i = 0; i < n; ++i) s[i] = char16_t(b_[at_ + i * 2] | b_[at_ + i * 2 + 1] << 8);
         at_ += size_t(n) * 2;
         return ttstr(s.c_str());
     }
@@ -429,7 +405,7 @@ static tjs_error ShioriLoadDataPack(tTJSVariant *result, tjs_int count, tTJSVari
     if (count > 1 && param[1] && param[1]->Type() == tvtObject && param[1]->AsObjectNoAddRef()) {
         tTJSVariant iv;
         iTJSDispatch2 *options = param[1]->AsObjectNoAddRef();
-        if (TJS_SUCCEEDED(options->PropGet(0, "outeriv", nullptr, &iv, options)) && iv.Type() == tvtString)
+        if (TJS_SUCCEEDED(options->PropGet(0, TJS_W("outeriv"), nullptr, &iv, options)) && iv.Type() == tvtString)
             outerIV = ttstr(iv).AsStdString();
     }
     Bytes bytes;
@@ -437,9 +413,9 @@ static tjs_error ShioriLoadDataPack(tTJSVariant *result, tjs_int count, tTJSVari
     if (!shiorikrkr::util::readStorage(name, bytes, error)) TVPThrowExceptionMessage(ttstr(error.c_str()).c_str());
     tTJSVariant value;
     try {
-        if (!decodePack(bytes, outerIV, value)) TVPThrowExceptionMessage((ttstr("not a data pack: ") + name).c_str());
+        if (!decodePack(bytes, outerIV, value)) TVPThrowExceptionMessage((ttstr(TJS_W("not a data pack: ")) + name).c_str());
     } catch (const std::runtime_error &e) {
-        TVPThrowExceptionMessage((ttstr(e.what()) + ttstr(": ") + name).c_str());
+        TVPThrowExceptionMessage((ttstr(e.what()) + ttstr(TJS_W(": ")) + name).c_str());
     }
     if (result) *result = value;
     return TJS_S_OK;

@@ -780,3 +780,32 @@ index 85ec256..d7b3222 100644
  	virtual tjs_error GetPixelFormat(/*out*/tjs_int *bpp) = 0;
  		// return image bit depth
  	virtual tjs_error GetPitchBytes(/*out*/tjs_int *pitch) = 0;
+diff --git a/cpp/plugins/windowEx.cpp b/cpp/plugins/windowEx.cpp
+index 7471472..4d7469b 100644
+--- a/cpp/plugins/windowEx.cpp
++++ b/cpp/plugins/windowEx.cpp
+@@ -1435,6 +1435,24 @@ struct System {
+ 
+     static tjs_error getCursorPos(tTJSVariant *r, tjs_int n, tTJSVariant **p,
+                                   iTJSDispatch2 *obj) {
++#ifdef SHIORIKRKR
++        // Shiori: the pointer in screen coordinates (the main window's left and top plus
++        // its client position), as %[x, y] (WORLD END ECONOMiCA ep.3 reads it on every move).
++        if(r && TVPMainWindow) {
++            tjs_int x = 0, y = 0;
++            TVPMainWindow->GetCursorPos(x, y);
++            if(iTJSDispatch2 *window = TVPMainWindow->GetOwnerNoAddRef()) {
++                ncbPropAccessor acc{ window };
++                x += acc.getIntValue(TJS_W("left"));
++                y += acc.getIntValue(TJS_W("top"));
++            }
++            ncbDictionaryAccessor dict;
++            dict.SetValue(TJS_W("x"), x);
++            dict.SetValue(TJS_W("y"), y);
++            iTJSDispatch2 *d = dict.GetDispatch();
++            r->SetObject(d, d);
++        }
++#endif
+         return TJS_S_OK;
+     }
+ 
