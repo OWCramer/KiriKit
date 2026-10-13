@@ -437,6 +437,29 @@ kernel void shioriLayerOp(device uint *tar [[buffer(0)]],
     }
     tar[ti] = r;
 }
+
+// layerExRaster's copyRaster: each row of the source, shifted sideways by that row's offset
+// (positive: right, the row's start left as it was; negative: left), into the target. Pitches
+// in pixels; offsets[row] for each row of the clip.
+struct RasterParams {
+    uint tarPitch, srcPitch;
+    uint left, top, width, height;
+};
+kernel void shioriRasterCopy(device uint *tar [[buffer(0)]],
+                             device const uint *src [[buffer(1)]],
+                             device const int *offsets [[buffer(2)]],
+                             constant RasterParams &p [[buffer(3)]],
+                             uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= p.width || gid.y >= p.height) return;
+    int d = offsets[gid.y];
+    int x = int(gid.x);
+    uint row = p.top + gid.y;
+    if (d >= 0) {
+        if (x < int(p.width) - d) tar[row * p.tarPitch + p.left + uint(x + d)] = src[row * p.srcPitch + p.left + uint(x)];
+    } else {
+        if (x < int(p.width) + d) tar[row * p.tarPitch + p.left + uint(x)] = src[row * p.srcPitch + p.left + uint(x - d)];
+    }
+}
 )MSL";
 
 } // namespace shiori::metal

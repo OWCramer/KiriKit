@@ -66,6 +66,7 @@ struct Device {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
     id<MTLComputePipelineState> pipeline = nil;
+    id<MTLComputePipelineState> rasterPipeline = nil;
     id<MTLBuffer> ooo = nil, negmul = nil;
     NSUInteger linearAlignment = 64;
 
@@ -81,6 +82,7 @@ struct Device {
     unsigned syncs = 0, commits = 0, dispatches = 0, renames = 0;
     double syncSeconds = 0;
     double syncSecondsTotal = 0; // never cleared (the host's slow-tick lines)
+    std::atomic<uint64_t> gpuMicros{0}; // GPU time of completed command buffers (the profile)
 
     bool start() {
         device = MTLCreateSystemDefaultDevice();
@@ -95,6 +97,7 @@ struct Device {
         id<MTLFunction> function = [library newFunctionWithName:@"shioriLayerOp"];
         pipeline = [device newComputePipelineStateWithFunction:function error:&error];
         if (!pipeline) return false;
+        rasterPipeline = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"shioriRasterCopy"] error:&error];
         linearAlignment = std::max<NSUInteger>(64, [device minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatRGBA8Unorm]);
         return true;
     }
@@ -179,7 +182,10 @@ struct Device {
     void finish() {
         uint64_t serial = openSerial;
         std::atomic<uint64_t> *done = &completed;
-        [open addCompletedHandler:^(id<MTLCommandBuffer>) {
+        std::atomic<uint64_t> *busy = &gpuMicros;
+        [open addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+            const double took = buffer.GPUEndTime - buffer.GPUStartTime;
+            if (took > 0 && took < 1) busy->fetch_add(uint64_t(took * 1e6));
             uint64_t seen = done->load();
             while (seen < serial && !done->compare_exchange_weak(seen, serial)) {}
         }];
@@ -210,12 +216,13 @@ struct Device {
         syncSeconds += waited;
         syncSecondsTotal += waited;
         static const bool trace = getenv("SHIORIKRKR_TRACE_SYNC") != nullptr;
-        if (trace && waited > 0.001)
+        static const double traceMin = trace ? atof(getenv("SHIORIKRKR_TRACE_SYNC")) / 1000 : 0; // ms (1 = waits over 1 ms; 0 = all)
+        if (trace && waited >= traceMin)
         {
             fprintf(stderr, "ShioriKrkr GPU wait %.1f ms in %s\n", waited * 1000, syncLabel().empty() ? "(outside a layer op)" : syncLabel().c_str());
             // Where a wait outside a layer operation came from (hit tests aside): a few frames.
             static int traced = 0;
-            if (syncLabel().empty() && traced < 40) {
+            if (syncLabel().empty() && traced < 400) {
                 void *frames[12];
                 const int n = backtrace(frames, 12);
                 char **names = backtrace_symbols(frames, n);
@@ -264,8 +271,31 @@ public:
 
     // Before the CPU reads: waits for queued GPU work that writes this image (work that only
     // reads it doesn't matter).
+    // SHIORIKRKR_TRACE_TOUCH: CPU reads and writes of an image the GPU used in the last two
+    // command buffers (on a slower GPU, each is a wait).
+    void TraceTouch(const char *what, uint64_t serial) const {
+        static const bool on = getenv("SHIORIKRKR_TRACE_TOUCH") != nullptr;
+        if (!on || !serial || serial + 2 < gpu().nextSerial) return;
+        void *frames[16];
+        const int n = backtrace(frames, 16);
+        char **names = backtrace_symbols(frames, n);
+        fprintf(stderr, "ShioriKrkr touch %s %ux%u:", what, Width, Height);
+        for (int i = 2; i < n && names; ++i) {
+            const char *sym = strrchr(names[i], ' ');
+            const char *start = names[i];
+            // the symbol is the 4th field
+            int field = 0;
+            for (const char *c = names[i]; *c && field < 3; ++c)
+                if (*c == ' ' && c[1] != ' ') { ++field; start = c + 1; }
+            (void)sym;
+            fprintf(stderr, " %.*s", int(strcspn(start, " ")), start);
+        }
+        fprintf(stderr, "\n");
+        free(names);
+    }
     void Idle() {
         uint64_t write = LastWrite.load(std::memory_order_acquire);
+        TraceTouch("read", write);
         if (write && write > gpu().completed.load(std::memory_order_acquire)) gpu().wait(write);
     }
     // Before the CPU writes: when queued GPU work only reads this image, the image moves to a
@@ -274,6 +304,7 @@ public:
     void IdleForWrite() {
         const uint64_t done = gpu().completed.load(std::memory_order_acquire);
         const uint64_t use = LastUse.load(std::memory_order_acquire);
+        TraceTouch(Capacity > kRenameLimit || (LastWrite.load() && LastWrite.load() > done) ? "write(wait)" : "write(rename)", use);
         if (!use || use <= done) return;
         const uint64_t write = LastWrite.load(std::memory_order_acquire);
         if ((write && write > done) || Capacity > kRenameLimit) {
@@ -668,7 +699,24 @@ public:
                 onGPU = Verify(m, tar, reftar, rctar, textures);
             } else {
                 onGPU = TryGPU(m, tar, rctar, textures);
-                if (!onGPU) OnCPU(m, tar, reftar, rctar, textures);
+                if (!onGPU) {
+                    static const bool traceCPU = getenv("SHIORIKRKR_TRACE_CPU") != nullptr;
+                    if (traceCPU) {
+                        Texture *t = ours(tar);
+                        fprintf(stderr, "ShioriKrkr on the CPU: %s %d,%d %dx%d into %ux%u bpp %d ours %d busy %d; %zu src", m->GetName().c_str(),
+                                rctar.left, rctar.top, rctar.get_width(), rctar.get_height(), tar ? tar->GetWidth() : 0,
+                                tar ? tar->GetHeight() : 0, t ? t->BytesPerPixel() : -1, t != nullptr, t ? t->Busy() : 0, textures.size());
+                        for (size_t i = 0; i < textures.size(); ++i) {
+                            Texture *s2 = ours(textures[i].first);
+                            const tTVPRect &r = textures[i].second;
+                            fprintf(stderr, " [%d,%d %dx%d of %ux%u bpp %d ours %d busy %d]", r.left, r.top, r.get_width(), r.get_height(),
+                                    textures[i].first ? textures[i].first->GetWidth() : 0, textures[i].first ? textures[i].first->GetHeight() : 0,
+                                    s2 ? s2->BytesPerPixel() : -1, s2 != nullptr, s2 ? s2->Busy() : 0);
+                        }
+                        fprintf(stderr, "\n");
+                    }
+                    OnCPU(m, tar, reftar, rctar, textures);
+                }
             }
         } else {
             IdleAll(tar, reftar, textures);
@@ -994,7 +1042,34 @@ private:
         if (!mode) { if (getenv("SHIORIKRKR_TRACE_WARP")) fprintf(stderr, "warp: stretch type %d\n", StretchType); return false; }
         float matrix[9];
         for (int i = 0; i < 9; ++i) matrix[i] = float(inv[i]);
-        DispatchSampled(m, tar, rcclip, src, view, unsigned(mode), matrix);
+        // krkr2 draws a warp over its whole clip, the source counting as clear outside the quad.
+        // For blends that leave the target as it is under a clear source, only the quad's
+        // bounds (a pixel more for filtering) are worth running: a 64-pixel particle on a
+        // 1280x720 layer was 900,000 threads, ~100 of them a frame in Ninja Girl's rain.
+        tTVPRect area = rcclip;
+        const unsigned op = m->K.shape == Shape::BltAndOpa && m->Opa != 255 ? m->K.opOpa : m->K.op;
+        const bool clearKeeps = (op >= OpAlphaHDA && op <= OpAlphaAo) || (op >= OpAddAlphaHDA && op <= OpAddAlphaAo) ||
+            (op >= OpPs && op < OpColorMap);
+        static const bool fullClip = getenv("SHIORIKRKR_WARP_FULL") != nullptr; // for comparisons
+        if (clearKeeps && !fullClip) {
+            double x0 = dstpt[0].x, x1 = x0, y0 = dstpt[0].y, y1 = y0;
+            for (int i = 1; i < nTriangles * 3; ++i) {
+                x0 = std::min(x0, dstpt[i].x), x1 = std::max(x1, dstpt[i].x);
+                y0 = std::min(y0, dstpt[i].y), y1 = std::max(y1, dstpt[i].y);
+            }
+            tTVPRect bounds(tjs_int(std::floor(x0)) - 2, tjs_int(std::floor(y0)) - 2, tjs_int(std::ceil(x1)) + 3,
+                            tjs_int(std::ceil(y1)) + 3);
+            tTVPRect clipped;
+            if (!TVPIntersectRect(&clipped, rcclip, bounds)) return true; // nothing of it inside
+            if (clipped.left != rcclip.left || clipped.top != rcclip.top) {
+                const float dx = float(clipped.left - rcclip.left), dy = float(clipped.top - rcclip.top);
+                matrix[2] += matrix[0] * dx + matrix[1] * dy;
+                matrix[5] += matrix[3] * dx + matrix[4] * dy;
+                matrix[8] += matrix[6] * dx + matrix[7] * dy;
+            }
+            area = clipped;
+        }
+        DispatchSampled(m, tar, area, src, view, unsigned(mode), matrix);
         return true;
     }
 
@@ -1295,6 +1370,37 @@ void flush() {
     if (gpu().device) gpu().commit();
 }
 
+bool rasterCopy(iTVPTexture2D *target, iTVPTexture2D *source, int left, int top, int width, int height, const int *offsets) {
+    Texture *tar = ours(target), *src = ours(source);
+    if (!tar || !src || tar == src || tar->BytesPerPixel() != 4 || src->BytesPerPixel() != 4) return false;
+    if (left < 0 || top < 0 || width <= 0 || height <= 0) return width <= 0 || height <= 0;
+    if (unsigned(left + width) > tar->GetWidth() || unsigned(top + height) > tar->GetHeight() ||
+        unsigned(left + width) > src->GetWidth() || unsigned(top + height) > src->GetHeight())
+        return false;
+    Device &g = gpu();
+    if (!g.rasterPipeline) return false;
+    std::lock_guard<std::recursive_mutex> lock(g.mutex);
+    uint64_t serial = 0;
+    id<MTLCommandBuffer> commands = g.bareCommandBuffer(serial);
+    id<MTLComputeCommandEncoder> e = [commands computeCommandEncoder];
+    [e setComputePipelineState:g.rasterPipeline];
+    [e setBuffer:tar->Buffer() offset:0 atIndex:0];
+    [e setBuffer:src->Buffer() offset:0 atIndex:1];
+    const size_t bytes = size_t(height) * sizeof(int);
+    if (bytes <= 4096) [e setBytes:offsets length:bytes atIndex:2];
+    else [e setBuffer:[g.device newBufferWithBytes:offsets length:bytes options:MTLResourceStorageModeShared] offset:0 atIndex:2];
+    struct {
+        uint32_t tarPitch, srcPitch, left, top, width, height;
+    } p = {uint32_t(tar->GetPitch() / 4), uint32_t(src->GetPitch() / 4), uint32_t(left), uint32_t(top), uint32_t(width), uint32_t(height)};
+    [e setBytes:&p length:sizeof(p) atIndex:3];
+    [e dispatchThreads:MTLSizeMake(width, height, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+    [e endEncoding];
+    ++g.dispatches;
+    src->MarkUsed(serial);
+    tar->MarkWritten(serial);
+    return true;
+}
+
 double gpuWaitSeconds() { return instance ? gpu().syncSecondsTotal : 0; }
 
 std::string profileReport(double ticks) {
@@ -1304,8 +1410,9 @@ std::string profileReport(double ticks) {
     std::string out;
     char line[256];
     Device &g = gpu();
-    snprintf(line, sizeof line, "metal: %.2f syncs/tick (%.2f ms), %.2f renames, %.1f dispatches, %.2f commits;", g.syncs / ticks,
-             g.syncSeconds * 1000 / ticks, g.renames / ticks, g.dispatches / ticks, g.commits / ticks);
+    snprintf(line, sizeof line, "metal: %.2f syncs/tick (%.2f ms), %.2f renames, %.1f dispatches, %.2f commits, GPU busy %.2f ms/tick;",
+             g.syncs / ticks, g.syncSeconds * 1000 / ticks, g.renames / ticks, g.dispatches / ticks, g.commits / ticks,
+             g.gpuMicros.exchange(0) / 1000.0 / ticks);
     out += line;
     int shown = 0;
     for (auto &[name, s] : rows) {

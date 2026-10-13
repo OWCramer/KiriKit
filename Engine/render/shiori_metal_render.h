@@ -17,6 +17,10 @@ namespace shiori::metal {
 /// Commits the GPU work queued this tick (without waiting for it).
 void flush();
 
+/// layerExRaster's copyRaster on the GPU: rows of `source` shifted by offsets[row] into
+/// `target` within the clip; false when either image isn't this renderer's (the CPU does it).
+bool rasterCopy(iTVPTexture2D *target, iTVPTexture2D *source, int left, int top, int width, int height, const int *offsets);
+
 /// Seconds the CPU has waited for the GPU in all (for slow-tick lines).
 double gpuWaitSeconds();
 
