@@ -91,7 +91,7 @@ list(TRANSFORM VISUAL_SOURCES APPEND ".cpp")
 
 # Left out of sound: WaveMixer (OpenAL/SDL2; Shiori's audio output replaces it).
 set(SOUND_SOURCES
-    CDDAIntf MathAlgorithms MIDIIntf PhaseVocoderDSP PhaseVocoderFilter
+    CDDAIntf MIDIIntf PhaseVocoderDSP PhaseVocoderFilter
     SoundBufferBaseIntf VorbisWaveDecoder WaveFormatConverter WaveIntf WaveLoopManager
     WaveSegmentQueue win32/CDDAImpl win32/MIDIImpl win32/SoundBufferBaseImpl win32/tvpsnd
     win32/WaveImpl)
@@ -111,11 +111,55 @@ set(OTHER_CORE_SOURCES
     "${CORE}/environ/Application.cpp" "${CORE}/environ/DetectCPU.cpp"
     "${CORE}/environ/win32/SystemControl.cpp")
 
+# ---- plug-ins (built in; Plugins.link finds them by their DLL names) ----
+# krkr2's own (KiriKiri licence). Left out: layerex_draw (libgdiplus; krkrsdl3's plutovg one
+# below instead), psbfile (FreeMote layout), motionplayer (closed-binary lineage), psdfile
+# (Boost.Spirit), steam, layerExMovie (Kodi movie player).
+set(KRKR2_PLUGIN_SOURCES
+    scriptsEx win32dialog dirlist csvParser varfile saveStruct getabout addFont wutcwf windowEx
+    getSample layerExPerspective fftgraph LayerExBase xp3filter fstat/main)
+list(TRANSFORM KRKR2_PLUGIN_SOURCES PREPEND "${KRKR2}/plugins/")
+list(TRANSFORM KRKR2_PLUGIN_SOURCES APPEND ".cpp")
+# wamsoft's originals (KiriKiri licence; Vendor/upstream-plugins, pinned in fetch.sh) and
+# 3c1u/TextRender (Apache-2.0 / MIT), built in as static plug-ins: each file is compiled with
+# its plug-in name, and shiori_plugin_links.cpp runs their link entry points when a game links
+# the DLL name.
+set(UPSTREAM "${VENDOR}/upstream-plugins")
+set(PLUGIN_SOURCES)
+function(shiori_plugin name dll dir)
+    set(files ${ARGN})
+    list(TRANSFORM files PREPEND "${dir}/")
+    set_source_files_properties(${files} PROPERTIES
+        COMPILE_DEFINITIONS "TVP_STATIC_PLUGIN;TVP_PLUGIN_NAME=${name};NCB_MODULE_NAME=TJS_W(\"${dll}\")"
+        INCLUDE_DIRECTORIES "${dir}"
+        COMPILE_OPTIONS "-include;${HERE}/compat/plugins/shiori_plugin_prefix.h")
+    set(PLUGIN_SOURCES ${PLUGIN_SOURCES} ${files} PARENT_SCOPE)
+endfunction()
+# KAGParserEx: krkr2's core KAGParser is already KAGParserEx's parser (base/KAGParser.cpp);
+# the DLL name links to nothing more.
+shiori_plugin(extrans extrans.dll "${UPSTREAM}/wamsoft/extrans" Main.cpp wave.cpp mosaic.cpp turn.cpp
+    turntrans_table.cpp rotatebase.cpp rotatetrans.cpp ripple.cpp)
+shiori_plugin(AlphaMovie AlphaMovie.dll "${UPSTREAM}/wamsoft/AlphaMovie" AlphaMovie.cpp)
+shiori_plugin(layerExAreaAverage layerExAreaAverage.dll "${UPSTREAM}/wamsoft/layerExAreaAverage" main.cpp)
+shiori_plugin(layerExBTOA layerExBTOA.dll "${UPSTREAM}/wamsoft/layerExBTOA" Main.cpp)
+shiori_plugin(layerExImage layerExImage.dll "${UPSTREAM}/wamsoft/layerExImage" LayerExImage.cpp Main.cpp LicensesGen.cpp)
+shiori_plugin(layerExRaster layerExRaster.dll "${UPSTREAM}/wamsoft/layerExRaster" main.cpp)
+shiori_plugin(shrinkCopy shrinkCopy.dll "${UPSTREAM}/wamsoft/shrinkCopy" main.cpp)
+shiori_plugin(textrender textrender.dll "${UPSTREAM}/3c1u/TextRender" textrender.cc)
+# krkrsdl3's (KiriKiri licence plus its publish-your-changes term) for the few with no other
+# source: PackinOne, lzfs, gfxEffect, and LayerExDraw on plutovg.
+shiori_plugin(PackinOne PackinOne.dll "${SDL3PLUGINS}" PackinOne.cpp)
+shiori_plugin(lzfs lzfs.dll "${SDL3PLUGINS}" lzfs.cpp)
+shiori_plugin(gfxEffect gfxEffect.dll "${SDL3PLUGINS}" gfxEffect.cpp)
+shiori_plugin(layerExDraw layerExDraw.dll "${SDL3PLUGINS}/LayerExDraw" LayerExDraw.cpp)
+
 # ---- Shiori's environment (replaces krkr2's cocos2d-x one) ----
 file(GLOB SHIORI_ENVIRON_SOURCES CONFIGURE_DEPENDS "${HERE}/environ/*.cpp" "${HERE}/environ/*.mm")
 
-set(SOURCES ${PARSERS} "${GEN}/tjsDateWordMap.inc" ${TJS2_SOURCES} ${BASE_SOURCES} ${VISUAL_SOURCES}
-    ${SOUND_SOURCES} ${UTILS_SOURCES} ${OTHER_CORE_SOURCES} ${SHIORI_ENVIRON_SOURCES})
+set(SHIORI_SOURCES "${HERE}/shiorikrkr_host.mm" "${HERE}/cx_decrypt.cpp" "${HERE}/nekoworks.cpp" "${HERE}/cursor_decode.mm")
+set(SOURCES ${SHIORI_SOURCES} ${PARSERS} "${GEN}/tjsDateWordMap.inc" ${TJS2_SOURCES} ${BASE_SOURCES} ${VISUAL_SOURCES}
+    ${SOUND_SOURCES} ${UTILS_SOURCES} ${OTHER_CORE_SOURCES} ${SHIORI_ENVIRON_SOURCES}
+    ${KRKR2_PLUGIN_SOURCES} ${PLUGIN_SOURCES} "${HERE}/getlangname.cpp" "${HERE}/shiori_plugin_links.cpp")
 
 option(SHIORIKRKR_DEBUG_THROW "Backtrace every C++ throw (SHIORIKRKR_TRACE_THROW=1)" OFF)
 if(SHIORIKRKR_DEBUG_THROW)
@@ -134,10 +178,10 @@ else()
 endif()
 # Upstream code is written for warnings-off builds; keep the log readable.
 target_compile_options(ShioriKrkr PRIVATE -w)
-set_source_files_properties(${SHIORI_ENVIRON_SOURCES} PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+set_source_files_properties(${SHIORI_ENVIRON_SOURCES} "${HERE}/shiorikrkr_host.mm" "${HERE}/cursor_decode.mm" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
 target_include_directories(ShioriKrkr PRIVATE
-    "${HERE}/compat"
+    "${HERE}/compat" "${HERE}/compat/plugins"
     "${HERE}/environ"
     "${HERE}/../Sources/CShioriKrkr/include"
     "${GEN}"
@@ -200,5 +244,5 @@ else()
     target_include_directories(shiorikrkr-harness PRIVATE "${HERE}/../Sources/CShioriKrkr/include")
     target_compile_options(shiorikrkr-harness PRIVATE -fobjc-arc)
     target_link_libraries(shiorikrkr-harness PRIVATE ShioriKrkr "-framework Foundation" "-framework AppKit"
-        "-framework Metal" "-framework QuartzCore")
+        "-framework Metal" "-framework QuartzCore" "-framework ImageIO" "-framework CoreGraphics")
 endif()

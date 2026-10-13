@@ -11,8 +11,11 @@
 //       [--present]  (frames go to the host, as the app's Metal presenter takes them)
 //       [--exe KARAKARA2.exe] [--scheme scheme.shcx] [--font default.ttf] [--frames 600]
 //       [--click FRAME:X,Y]... [--eval FRAME:TJS]... [--capture FRAME:out.bmp]...
-//       [-- krkrsdl3 options, e.g. -render=software]
+//       [-- engine settings, e.g. -renderer=metal]
 #import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#import <ImageIO/ImageIO.h>
+#include <chrono>
 
 #include <cstdio>
 #include <cstdlib>
@@ -37,6 +40,46 @@ static void link(NSString *from, NSString *into, NSFileManager *fm) {
         [fm removeItemAtPath:target error:nil];
         [fm createSymbolicLinkAtPath:target withDestinationPath:[from stringByAppendingPathComponent:name] error:nil];
     }
+}
+
+// Saves a presented frame (RGBA or BGRA bytes, or the engine's Metal texture) as a PNG.
+static void writePNG(const std::string &path, const shiorikrkr_frame_t &frame) {
+    std::vector<uint8_t> rgba(size_t(frame.width) * frame.height * 4);
+    if (frame.texture) {
+        id<MTLTexture> texture = (__bridge id<MTLTexture>)frame.texture;
+        std::vector<uint8_t> bgra(rgba.size());
+        [texture getBytes:bgra.data() bytesPerRow:size_t(frame.width) * 4
+               fromRegion:MTLRegionMake2D(0, 0, frame.width, frame.height) mipmapLevel:0];
+        for (size_t i = 0; i < rgba.size(); i += 4) {
+            rgba[i] = bgra[i + 2];
+            rgba[i + 1] = bgra[i + 1];
+            rgba[i + 2] = bgra[i];
+            rgba[i + 3] = 255;
+        }
+    } else {
+        for (int y = 0; y < frame.height; ++y)
+            for (int x = 0; x < frame.width; ++x) {
+                const uint8_t *p = frame.pixels + size_t(y) * frame.pitch + size_t(x) * 4;
+                uint8_t *q = &rgba[(size_t(y) * frame.width + x) * 4];
+                const bool bgra = frame.format == SHIORIKRKR_FRAME_BGRA;
+                q[0] = bgra ? p[2] : p[0];
+                q[1] = p[1];
+                q[2] = bgra ? p[0] : p[2];
+                q[3] = 255;
+            }
+    }
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(rgba.data(), frame.width, frame.height, 8, size_t(frame.width) * 4,
+                                                 space, kCGImageAlphaNoneSkipLast);
+    CGImageRef image = CGBitmapContextCreateImage(context);
+    NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
+    CGImageDestinationRef dest = CGImageDestinationCreateWithURL((__bridge CFURLRef)url, CFSTR("public.png"), 1, nullptr);
+    CGImageDestinationAddImage(dest, image, nullptr);
+    CGImageDestinationFinalize(dest);
+    CFRelease(dest);
+    CGImageRelease(image);
+    CGContextRelease(context);
+    CGColorSpaceRelease(space);
 }
 
 int main(int argc, char **argv) {
@@ -90,7 +133,7 @@ int main(int argc, char **argv) {
         [fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
         link([NSString stringWithUTF8String:base.c_str()], root, fm);
         if (!patch.empty()) link([NSString stringWithUTF8String:patch.c_str()], root, fm);
-        // A fallback font for text the game draws without its own (krkrsdl3 looks for
+        // A fallback font for text the game draws without its own (the engine looks for
         // default.ttf in the game folder first); the app links Shiori's bundled one.
         if (!font.empty())
             [fm createSymbolicLinkAtPath:[root stringByAppendingPathComponent:@"default.ttf"]
@@ -171,23 +214,8 @@ int main(int argc, char **argv) {
                 std::printf("== frame %d: capture %s -> %d (canvas %dx%d)\n", frame, it->second.c_str(), r, w, h);
                 shiorikrkr_frame_t presented = {};
                 if (shiorikrkr_frame(&presented)) {
-                    // The host presenter's frame too, as a PPM beside the capture.
-                    const std::string ppm = it->second + ".presented.ppm";
-                    if (FILE *out = std::fopen(ppm.c_str(), "wb")) {
-                        std::fprintf(out, "P6\n%d %d\n255\n", presented.width, presented.height);
-                        for (int y = 0; y < presented.height; ++y)
-                            for (int x = 0; x < presented.width; ++x)
-                                std::fwrite(presented.pixels + y * presented.pitch + x * 4, 1, 3, out);
-                        std::fclose(out);
-                    }
-                    // And its alpha channel (a PGM), which the presenter ignores but MetalFX sees.
-                    if (FILE *out = std::fopen((it->second + ".alpha.pgm").c_str(), "wb")) {
-                        std::fprintf(out, "P5\n%d %d\n255\n", presented.width, presented.height);
-                        for (int y = 0; y < presented.height; ++y)
-                            for (int x = 0; x < presented.width; ++x)
-                                std::fputc(presented.pixels[y * presented.pitch + x * 4 + 3], out);
-                        std::fclose(out);
-                    }
+                    // The host presenter's frame too, as a PNG beside the capture.
+                    writePNG(it->second + ".presented.png", presented);
                     std::printf("== frame %d: presented %dx%d serial %llu blank %d\n", frame, presented.width,
                                 presented.height, (unsigned long long)presented.serial, presented.blank);
                 }

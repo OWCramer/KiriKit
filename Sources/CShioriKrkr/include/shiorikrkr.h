@@ -2,13 +2,14 @@
  * If a copy of the MPL was not distributed with this file, You can obtain one at
  * https://mozilla.org/MPL/2.0/. */
 
-/* ShioriKrkr: Shiori's own KiriKiri engine (krkrsdl3-based, clean-room; see
+/* ShioriKrkr: Shiori's own KiriKiri engine (krkr2's core at AetherKrkr's fork point with
+ * Shiori's own environment, Metal compositor and plug-ins; see
  * Packages/ShioriKrkrKit/PROVENANCE.md). This is the whole interface the framework exports;
- * every krkrsdl3, TJS2, SDL3 and dependency symbol stays inside ShioriKrkr.framework, so it
- * can sit in the same process as AetherKrkr (ShioriKiriKiri.framework) and Ren'Py's SDL2.
+ * every krkr2, TJS2 and dependency symbol stays inside ShioriKrkr.framework, so it can sit in
+ * the same process as AetherKrkr (ShioriKiriKiri.framework) and Ren'Py's SDL2.
  *
  * Threading: every call is made on the thread that called shiorikrkr_start (the main
- * thread in the app). One game per process lifetime for now: krkrsdl3's globals aren't
+ * thread in the app). One game per process lifetime for now: the engine's globals aren't
  * reset, so after shiorikrkr_stop the app returns to the library but a second game in the
  * same process isn't supported yet. */
 
@@ -21,7 +22,7 @@
 extern "C" {
 #endif
 
-#define SHIORIKRKR_API_VERSION 3
+#define SHIORIKRKR_API_VERSION 4
 
 /* One line of the engine's log (UTF-8, no newline). */
 typedef void (*shiorikrkr_log_fn)(void *context, const char *line);
@@ -83,7 +84,7 @@ typedef struct shiorikrkr_config {
     /* A CxDec scheme in Shiori's SHCX layout (GARbroDatabase.swift), or NULL. Archive reads
      * are then decrypted in memory, never written out. */
     const char *cx_scheme_path;
-    /* Extra krkrsdl3 options, e.g. "-render=software", "-window=1280x720". */
+    /* Engine settings as "-name=value", e.g. "-default_font=/path/font.ttf". */
     const char *const *arguments;
     uint32_t argument_count;
     shiorikrkr_log_fn log;
@@ -91,8 +92,7 @@ typedef struct shiorikrkr_config {
     /* Since API version 2. */
     shiorikrkr_message_fn message;
     void *message_context;
-    /* Non-zero: frames stay with the host (shiorikrkr_frame) and SDL draws nothing; zero:
-     * SDL's own renderer draws into the engine view (the spike's path). */
+    /* Kept for layout; frames always go to the host (shiorikrkr_frame). */
     int32_t host_presents;
     /* Since API version 3. NULL: E-mote characters aren't drawn. */
     const shiorikrkr_emote_host_t *emote;
@@ -102,32 +102,37 @@ enum {
     SHIORIKRKR_OK = 0,
     SHIORIKRKR_ERROR_ARGUMENTS = 1,   /* config missing or game_root not found */
     SHIORIKRKR_ERROR_SCHEME = 2,      /* cx_scheme_path given but unreadable */
-    SHIORIKRKR_ERROR_START = 3,       /* SDL, the window or the game's startup failed */
+    SHIORIKRKR_ERROR_START = 3,       /* the engine or the game's startup failed */
     SHIORIKRKR_ERROR_STATE = 4,       /* already started, or not started */
 };
 
-/* Starts the game: SDL, the engine's window and renderer, then the game's startup scripts
- * (they run inside this call up to their first wait). */
+/* Starts the game: the engine, then the game's startup scripts (they run inside this call up
+ * to their first wait). */
 int shiorikrkr_start(const shiorikrkr_config_t *config);
 
 /* One frame: delivers pending events, runs the engine's timers and scripts, composes and
  * presents. Returns 1 while the game runs, 0 once it has quit. */
 int shiorikrkr_tick(void);
 
-/* The platform view the engine draws into (UIView * on iOS, NSView * on macOS), for the
- * host to place in its own view hierarchy. NULL before start. The engine's own window is
- * hidden once the host has taken the view. */
+/* Kept for compatibility: always NULL (the host presents shiorikrkr_frame). */
 void *shiorikrkr_take_view(void);
 
-/* The game's composed frame, for the host to present: RGBA8, top row first. The pixels stay
- * valid until the next tick. serial changes when they do; blank is set while every sampled
- * pixel is black (the game's first frames, before its title draws). Returns 1 when there is a
- * frame. Only with host_presents. */
+/* The game's composed frame, for the host to present, top row first: pixels in format (RGBA8
+ * or BGRA8; alpha is meaningless, the frame is opaque), or, when texture is set, an
+ * id<MTLTexture> (BGRA8, on the engine's Metal device, finished by the engine's command queue
+ * before any later work on that queue) whose top-left width x height is the frame. Both stay
+ * valid until the next tick. serial changes when the frame does; blank is set while every
+ * sampled pixel is black (the game's first frames, before its title draws). Returns 1 when
+ * there is a frame. */
+enum { SHIORIKRKR_FRAME_RGBA = 0, SHIORIKRKR_FRAME_BGRA = 1 };
 typedef struct shiorikrkr_frame {
     const uint8_t *pixels;
     int32_t width, height, pitch;
     uint64_t serial;
     int32_t blank;
+    /* Since API version 4. */
+    int32_t format;
+    void *texture;
 } shiorikrkr_frame_t;
 int shiorikrkr_frame(shiorikrkr_frame_t *frame);
 
@@ -165,7 +170,7 @@ int shiorikrkr_eval(const char *expression, char *out, uint32_t capacity);
  * a BMP at path. Returns 0 on success. For tests and the Mac harness. */
 int shiorikrkr_capture(const char *path);
 
-/* Ends the game: the engine's exit handlers, then SDL. */
+/* Ends the game: the engine's exit handlers, then audio. */
 void shiorikrkr_stop(void);
 
 #ifdef __cplusplus

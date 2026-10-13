@@ -5,9 +5,11 @@
 // The platform functions krkr2's core expects from its environment (environ/Platform.h and
 // the ones its cocos2d-x scene used to define), written for Shiori on iOS and macOS. Paths
 // come from the host; message boxes go to the host's alerts; nothing here draws.
+#include <sys/stat.h>
 #include "shiori_environ.h"
 
 #include "tjsCommHead.h"
+#include "MsgIntf.h"
 #include "Platform.h"
 #include "StorageIntf.h"
 #include "StorageImpl.h"
@@ -17,7 +19,6 @@
 
 #import <Foundation/Foundation.h>
 #include <mach/mach.h>
-#include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -73,8 +74,6 @@ tjs_int TVPGetSelfUsedMemory() {
     return tjs_int(info.phys_footprint / (1024 * 1024));
 }
 
-void TVPCheckMemory() {}
-
 // ---- message boxes ----
 int TVPShowSimpleMessageBox(const ttstr &text, const ttstr &caption, const std::vector<ttstr> &buttons) {
     std::vector<std::string> labels;
@@ -83,14 +82,6 @@ int TVPShowSimpleMessageBox(const ttstr &text, const ttstr &caption, const std::
     auto &h = shiori::host();
     if (!h.messageBox) return 0;
     return h.messageBox(text.AsStdString(), caption.AsStdString(), labels);
-}
-
-int TVPShowSimpleMessageBox(const ttstr &text, const ttstr &caption) {
-    return TVPShowSimpleMessageBox(text, caption, std::vector<ttstr>{ttstr(TJS_W("OK"))});
-}
-
-int TVPShowSimpleMessageBoxYesNo(const ttstr &text, const ttstr &caption) {
-    return TVPShowSimpleMessageBox(text, caption, std::vector<ttstr>{ttstr(TJS_W("Yes")), ttstr(TJS_W("No"))});
 }
 
 extern "C" int TVPShowSimpleMessageBox(const char *text, const char *caption, unsigned int count,
@@ -196,7 +187,7 @@ bool TVPWriteDataToFile(const ttstr &filepath, const void *data, unsigned int le
 
 bool TVP_stat(const char *name, tTVP_stat &s) {
     struct stat t;
-    if (stat(name, &t) != 0) return false;
+    if (::stat(name, &t) != 0) return false;
     s.st_mode = t.st_mode;
     s.st_size = t.st_size;
     s.st_atime = t.st_atimespec.tv_sec;

@@ -111,7 +111,7 @@ public:
 
     explicit ShioriWindowLayer(tTJSNI_Window *w) : Instance(w) { windows().push_back(this); }
 
-    ~ShioriWindowLayer() override {
+    ~ShioriWindowLayer() {
         auto &list = windows();
         list.erase(std::remove(list.begin(), list.end(), this), list.end());
         if (current == this) current = list.empty() ? nullptr : list.back();

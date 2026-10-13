@@ -2,77 +2,69 @@
  * If a copy of the MPL was not distributed with this file, You can obtain one at
  * https://mozilla.org/MPL/2.0/. */
 
-// ShioriKrkr's host side: the C interface (shiorikrkr.h) over krkrsdl3. krkrsdl3's own
-// SDL3 application callbacks (environ/sdl3/sdl3_app.cpp: SDL_AppInit, SDL_AppEvent,
-// SDL_AppIterate, SDL_AppQuit) are driven from here instead of SDL's main, so the host app
-// keeps its UIApplication and run loop and ticks the engine from its own display link.
+// ShioriKrkr's host side: the C interface (shiorikrkr.h) over krkr2's core and Shiori's own
+// environment (environ/). The host app keeps its run loop and ticks the engine from its display
+// link; each tick runs krkr2's application step (events, timers, scripts, layer composition).
 #include "shiorikrkr.h"
-
-#define SDL_MAIN_USE_CALLBACKS
-#define SDL_MAIN_NOIMPL
-#include <SDL3/SDL.h>
-#include <SDL3/SDL_main.h>
-
-#include <atomic>
-#include <unistd.h>
-#include <cstring>
-#include <memory>
-#include <string>
-#include <vector>
 
 #include "tjsCommHead.h"
 #include "tjsError.h"
-#include "PlatformView.h"
-#include "TVPDebug.h"
-#include "TVPScript.h"
-#include "TVPStorage.h"
-#include "WindowManager.h"
+#include "Application.h"
+#include "DebugIntf.h"
+#include "EventIntf.h"
+#include "ScriptMgnIntf.h"
+#include "StorageIntf.h"
+#include "SysInitIntf.h"
+#include "RenderManager.h"
 #include "XP3Archive.h"
+#include "BinaryStream.h"
+#include "WindowImpl.h"
 
+#include "environ/shiori_environ.h"
 #include "cx_decrypt.h"
 #include "nekoworks.h"
-#include "shiorikrkr_presenter.h"
 #include "cursor_decode.h"
-#include "shiorikrkr_movie.h"
-#include "shiorikrkr_emote.h"
+
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/base_sink.h>
+
+#include <atomic>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unistd.h>
+#include <vector>
 
-// krkrsdl3 patch 0002: host hooks.
-extern krkrsdl3::iTVPRenderBackend *(*TVPHostRenderBackendFactory)();
-extern void (*TVPHostMouseCursor)(tjs_int cursor, const char *storage);
-extern int (*TVPHostMessageBox)(const char *text, const char *caption, const char *const *buttons, int buttonCount);
-
-#if TARGET_OS_IPHONE
-#import <UIKit/UIKit.h>
-#else
-#import <AppKit/AppKit.h>
-#endif
+#import <Foundation/Foundation.h>
 
 #define SHIORIKRKR_EXPORT extern "C" __attribute__((visibility("default")))
 
+extern int _argc;
+extern char **_argv;
+extern bool TVPTerminated;
 
 namespace {
 
 struct Host {
     bool started = false;
     bool finished = false;
+    int tickDepth = 0;
     shiorikrkr_log_fn log = nullptr;
     void *logContext = nullptr;
+    shiorikrkr_message_fn message = nullptr;
+    void *messageContext = nullptr;
     std::vector<std::string> argumentStorage;
     std::vector<char *> argv;
     std::unique_ptr<shiorikrkr::CxDecryptor> cx;
     shiorikrkr::NekoWorksKey neko;
-    bool viewTaken = false;
-    shiorikrkr_message_fn message = nullptr;
-    void *messageContext = nullptr;
-    bool hostPresents = false;
-    shiorikrkr::PresenterBackend *presenter = nullptr; // owned by krkrsdl3 once installed
     // The game's cursor: the last one set, decoded files by cursor number.
-    tjs_int cursor = 0;
+    int cursor = 0;
     uint32_t cursorSerial = 0;
-    std::map<tjs_int, std::shared_ptr<shiorikrkr::DecodedCursor>> cursorFiles;
+    std::map<int, std::shared_ptr<shiorikrkr::DecodedCursor>> cursorFiles;
     // Pointer input waiting for the engine. A button goes down a tick after the pointer
     // arrives and comes up at least a tick later: KAG's buttons light up on the move and
     // only then take a click, which a tap delivered all at once never was.
@@ -81,6 +73,8 @@ struct Host {
         std::function<void()> deliver;
     };
     std::deque<PendingInput> input;
+    // The frame handed out last.
+    std::vector<uint8_t> frameCopy;
 };
 
 Host &host() {
@@ -88,120 +82,65 @@ Host &host() {
     return instance;
 }
 
-void deliverLog(const ttstr &line) {
-    Host &h = host();
-    if (h.log) h.log(h.logContext, line.AsStdString().c_str());
-}
-
 void hostLog(const std::string &line) {
     Host &h = host();
     if (h.log) h.log(h.logContext, line.c_str());
+    else fprintf(stderr, "%s\n", line.c_str());
 }
 
-// krkrsdl3's XP3 extraction filter: called for every block read from an archive member,
-// with the member's adlr hash and the block's offset in the member.
-void cxFilter(tTVPXP3ExtractionFilterInfo *info, tTJSVariant *) {
+// spdlog's loggers ("core", "tjs2", "plugin") write to the host's log.
+template <typename Mutex>
+class HostSink : public spdlog::sinks::base_sink<Mutex> {
+protected:
+    void sink_it_(const spdlog::details::log_msg &msg) override {
+        hostLog(std::string(msg.payload.data(), msg.payload.size()));
+    }
+    void flush_() override {}
+};
+
+void installLoggers() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    auto sink = std::make_shared<HostSink<std::mutex>>();
+    for (const char *name : {"core", "tjs2", "plugin"}) {
+        auto logger = std::make_shared<spdlog::logger>(name, sink);
+        logger->set_level(spdlog::level::info);
+        spdlog::register_logger(logger);
+    }
+    spdlog::set_default_logger(std::make_shared<spdlog::logger>("shiori", sink));
+}
+
+// XP3 extraction filter: called for every block read from an archive member, with the
+// member's adlr hash and the block's offset in the member.
+void xp3Filter(tTVPXP3ExtractionFilterInfo *info, tTJSVariant *) {
     if (!info || !info->Buffer || info->BufferSize == 0) return;
-    if (host().neko.valid) {
-        shiorikrkr::decodeNekoWorks(host().neko, info->FileHash, info->Offset, static_cast<uint8_t *>(info->Buffer),
+    Host &h = host();
+    if (h.neko.valid) {
+        shiorikrkr::decodeNekoWorks(h.neko, info->FileHash, info->Offset, static_cast<uint8_t *>(info->Buffer),
                                     info->BufferSize);
         return;
     }
-    const auto &cx = host().cx;
-    if (!cx) return;
-    static const bool trace = getenv("SHIORIKRKR_TRACE_CX") != nullptr;
-    if (trace) {
-        const uint8_t *b = static_cast<const uint8_t *>(info->Buffer);
-        fprintf(stderr, "cx %s hash=%08x off=%llu size=%u first=%02x%02x%02x%02x\n", info->FileName.AsStdString().c_str(),
-                info->FileHash, (unsigned long long)info->Offset, info->BufferSize, b[0], info->BufferSize > 1 ? b[1] : 0,
-                info->BufferSize > 2 ? b[2] : 0, info->BufferSize > 3 ? b[3] : 0);
-    }
-    cx->decrypt(info->FileHash, info->Offset, static_cast<uint8_t *>(info->Buffer), info->BufferSize);
+    if (h.cx) h.cx->decrypt(info->FileHash, info->Offset, static_cast<uint8_t *>(info->Buffer), info->BufferSize);
 }
 
-int hostMessageBox(const char *text, const char *caption, const char *const *buttons, int count) {
-    Host &h = host();
-    hostLog(std::string("ShioriKrkr: message box: ") + (caption ? caption : "") + ": " + (text ? text : ""));
-    if (!h.message) return 0;
-    return h.message(h.messageContext, text, caption, buttons, count);
-}
-
-// KiriKiri's cursor numbers: 0 the default arrow, -1 (crNone) none, other negatives the
-// system shapes, and numbers krkrsdl3 patch 0001 gives cursor files.
-void hostMouseCursor(tjs_int cursor, const char *storage) {
+void cursorChanged(int cursor, const std::string &storage) {
     Host &h = host();
     if (cursor == h.cursor) return;
     h.cursor = cursor;
     h.cursorSerial++;
-    if (storage && *storage && !h.cursorFiles.count(cursor)) {
+    if (!storage.empty() && !h.cursorFiles.count(cursor)) {
         auto decoded = std::make_shared<shiorikrkr::DecodedCursor>();
         try {
-            std::unique_ptr<tTJSBinaryStream> stream(TVPCreateBinaryStreamForRead(ttstr(storage), TJS_N("")));
+            std::unique_ptr<tTJSBinaryStream> stream(TVPCreateBinaryStreamForRead(ttstr(storage.c_str()), TJS_W("")));
             std::vector<uint8_t> bytes(size_t(stream->GetSize()));
             if (!bytes.empty()) stream->ReadBuffer(bytes.data(), tjs_uint(bytes.size()));
             if (!shiorikrkr::decodeCursor(bytes.data(), bytes.size(), *decoded)) decoded.reset();
         } catch (...) {
             decoded.reset();
         }
-        hostLog(std::string("ShioriKrkr: cursor ") + storage + (decoded ? "" : " (couldn't decode)"));
+        hostLog("ShioriKrkr: cursor " + storage + (decoded ? "" : " (couldn't decode)"));
         h.cursorFiles[cursor] = decoded;
-    }
-}
-
-krkrsdl3::iTVPRenderBackend *makePresenter() {
-    auto *presenter = new shiorikrkr::PresenterBackend();
-    host().presenter = presenter;
-    return presenter;
-}
-
-SDL_Window *engineWindow() {
-    int count = 0;
-    SDL_Window **windows = SDL_GetWindows(&count);
-    SDL_Window *window = (windows && count > 0) ? windows[0] : nullptr;
-    SDL_free(windows);
-    return window;
-}
-
-void windowPoint(float x, float y, int &px, int &py) {
-    int width = 0, height = 0;
-    TVPGetWindowSize(&width, &height);
-    px = static_cast<int>(x * width);
-    py = static_cast<int>(y * height);
-}
-
-tTVPMouseButton mouseButton(int32_t button) {
-    switch (button) {
-    case SHIORIKRKR_BUTTON_RIGHT: return mbRight;
-    case SHIORIKRKR_BUTTON_MIDDLE: return mbMiddle;
-    default: return mbLeft;
-    }
-}
-
-// krkrsdl3 takes SDL scancodes and turns them into VK codes itself; the host speaks VK.
-SDL_Scancode scancodeForVirtualKey(int32_t vk) {
-    if (vk >= 0x41 && vk <= 0x5A) return SDL_Scancode(SDL_SCANCODE_A + (vk - 0x41));
-    if (vk == 0x30) return SDL_SCANCODE_0;
-    if (vk >= 0x31 && vk <= 0x39) return SDL_Scancode(SDL_SCANCODE_1 + (vk - 0x31));
-    if (vk >= 0x70 && vk <= 0x7B) return SDL_Scancode(SDL_SCANCODE_F1 + (vk - 0x70));
-    switch (vk) {
-    case 0x08: return SDL_SCANCODE_BACKSPACE;
-    case 0x09: return SDL_SCANCODE_TAB;
-    case 0x0D: return SDL_SCANCODE_RETURN;
-    case 0x10: return SDL_SCANCODE_LSHIFT;
-    case 0x11: return SDL_SCANCODE_LCTRL;
-    case 0x12: return SDL_SCANCODE_LALT;
-    case 0x1B: return SDL_SCANCODE_ESCAPE;
-    case 0x20: return SDL_SCANCODE_SPACE;
-    case 0x21: return SDL_SCANCODE_PAGEUP;
-    case 0x22: return SDL_SCANCODE_PAGEDOWN;
-    case 0x23: return SDL_SCANCODE_END;
-    case 0x24: return SDL_SCANCODE_HOME;
-    case 0x25: return SDL_SCANCODE_LEFT;
-    case 0x26: return SDL_SCANCODE_UP;
-    case 0x27: return SDL_SCANCODE_RIGHT;
-    case 0x28: return SDL_SCANCODE_DOWN;
-    case 0x2E: return SDL_SCANCODE_DELETE;
-    default: return SDL_SCANCODE_UNKNOWN;
     }
 }
 
@@ -212,7 +151,7 @@ int evaluate(const std::string &expression, std::string &text) {
     }
     try {
         tTJSVariant result;
-        TVPExecuteExpression(ttstr(expression), &result);
+        TVPExecuteExpression(ttstr(expression.c_str()), &result);
         text = result.Type() == tvtVoid ? std::string() : ttstr(result).AsStdString();
         return 0;
     } catch (const TJS::eTJS &e) {
@@ -225,6 +164,16 @@ int evaluate(const std::string &expression, std::string &text) {
     return 1;
 }
 
+void canvasPoint(float x, float y, int &px, int &py) {
+    int w = 0, h = 0;
+    shiori::windowCanvasSize(shiori::activeWindowLayer(), w, h);
+    px = int(x * w);
+    py = int(y * h);
+}
+
+// Windows key codes the host sends that KiriKiri knows by the same number.
+bool knownKey(int32_t vk) { return vk > 0 && vk < 0x200; }
+
 } // namespace
 
 SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
@@ -232,17 +181,49 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
     if (h.started) return SHIORIKRKR_ERROR_STATE;
     if (!config || config->struct_size < offsetof(shiorikrkr_config_t, emote) || !config->game_root)
         return SHIORIKRKR_ERROR_ARGUMENTS;
-    shiorikrkr::setEmoteHost(config->struct_size >= sizeof(shiorikrkr_config_t) ? config->emote : nullptr);
     h.log = config->log;
     h.logContext = config->log_context;
     h.message = config->message;
     h.messageContext = config->message_context;
-    h.hostPresents = config->host_presents != 0;
-    TVPSetOnLog(deliverLog);
-    TVPHostMessageBox = hostMessageBox;
-    TVPHostMouseCursor = hostMouseCursor;
-    TVPHostRenderBackendFactory = h.hostPresents ? makePresenter : nullptr;
+    h.finished = false;
+    installLoggers();
+    shiori::resetExit();
 
+    std::string root = config->game_root;
+    if (!root.empty() && root.back() != '/') root += '/';
+    if (access(root.c_str(), R_OK) != 0) return SHIORIKRKR_ERROR_ARGUMENTS;
+
+    auto &services = shiori::host();
+    services.log = hostLog;
+    services.messageBox = [](const std::string &text, const std::string &caption,
+                             const std::vector<std::string> &buttons) -> int {
+        Host &h = host();
+        if (!h.message) return 0;
+        std::vector<const char *> labels;
+        for (const auto &b : buttons) labels.push_back(b.c_str());
+        return h.message(h.messageContext, text.c_str(), caption.c_str(), labels.data(), int32_t(labels.size()));
+    };
+    services.gameRoot = root;
+    services.exeName = config->exe_name ? config->exe_name : "game.exe";
+    NSString *temp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"ShioriKrkr"];
+    [NSFileManager.defaultManager createDirectoryAtPath:temp withIntermediateDirectories:YES attributes:nil error:nil];
+    services.dataPath = std::string(temp.UTF8String) + "/";
+    shiori::cursorChanged = cursorChanged;
+
+    // Options: "-key=value" become engine settings (renderer, default_font ...).
+    shiori::clearConfigValues();
+    shiori::setConfigValue("renderer", "software");
+    for (uint32_t i = 0; i < config->argument_count; ++i) {
+        if (!config->arguments || !config->arguments[i]) continue;
+        std::string option = config->arguments[i];
+        if (option.empty() || option[0] != '-') continue;
+        const size_t eq = option.find('=');
+        if (eq == std::string::npos) shiori::setConfigValue(option.substr(1), "1");
+        else shiori::setConfigValue(option.substr(1, eq - 1), option.substr(eq + 1));
+    }
+
+    TVPXP3FilterOnlyFlaggedMembers = false;
+    TVPSetXP3ArchiveExtractionFilter(nullptr);
     if (config->cx_scheme_path && *config->cx_scheme_path) {
         shiorikrkr::CxScheme scheme;
         std::string error;
@@ -251,82 +232,68 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
             return SHIORIKRKR_ERROR_SCHEME;
         }
         h.cx = std::make_unique<shiorikrkr::CxDecryptor>(scheme);
-        TVPSetXP3ArchiveExtractionFilter(cxFilter);
-        // Members the archive stores plainly (info flags 0, like its extraction warning) are
-        // read as they are, as GARbro does.
+        TVPSetXP3ArchiveExtractionFilter(xp3Filter);
+        // Members the archive stores plainly (info flags 0) are read as they are, as GARbro does.
         TVPXP3FilterOnlyFlaggedMembers = true;
         hostLog("ShioriKrkr: CxDec scheme loaded");
     }
-
     // NEKO WORKs archives (NEKOPARA): their key comes from their own PNG and Ogg entries.
     h.neko = {};
     if (!h.cx) {
         std::string line;
-        if (shiorikrkr::detectNekoWorksKey(config->game_root, h.neko, line)) {
-            TVPSetXP3ArchiveExtractionFilter(cxFilter);
+        if (shiorikrkr::detectNekoWorksKey(root, h.neko, line)) {
+            TVPSetXP3ArchiveExtractionFilter(xp3Filter);
             TVPXP3FilterOnlyFlaggedMembers = true;
         }
         if (!line.empty()) hostLog("ShioriKrkr: " + line);
     }
 
-    // argv as krkrsdl3 expects it: the executable (its folder is System.exePath), the game
-    // folder, then options.
-    std::string root = config->game_root;
-    if (!root.empty() && root.back() != '/') root += '/';
-    h.argumentStorage.clear();
-    h.argumentStorage.push_back(root + (config->exe_name ? config->exe_name : "game.exe"));
-    // krkrsdl3 (like Kirikiroid2) opens the game by its startup archive: data.xp3 when the
-    // folder has one (its folder is then the project folder), else the folder itself.
-    std::string projectData = root;
+    // The game opens by its startup archive: data.xp3 when the folder has one, else the folder.
+    std::string project = root;
     for (const char *name : {"data.xp3", "Data.xp3", "DATA.XP3"}) {
         if (access((root + name).c_str(), R_OK) == 0) {
-            projectData = root + name;
+            project = root + name;
             break;
         }
     }
-    h.argumentStorage.push_back(projectData);
-    for (uint32_t i = 0; i < config->argument_count; ++i)
-        if (config->arguments && config->arguments[i]) h.argumentStorage.emplace_back(config->arguments[i]);
+    h.argumentStorage = {root + services.exeName, project};
     h.argv.clear();
     for (auto &argument : h.argumentStorage) h.argv.push_back(argument.data());
     h.argv.push_back(nullptr);
+    _argc = 2;
+    _argv = h.argv.data();
 
-#if TARGET_OS_IPHONE
-    // The host's display link ticks the engine: SDL mustn't run the run loop itself.
-    SDL_SetiOSEventPump(false);
-#endif
-    SDL_SetMainReady();
-    void *state = nullptr;
-    SDL_AppResult result = SDL_APP_FAILURE;
+    TVPTerminated = false;
+    if (!::Application) ::Application = new tTVPApplication();
+    bool ok = false;
     try {
-        result = SDL_AppInit(&state, static_cast<int>(h.argumentStorage.size()), h.argv.data());
+        ok = ::Application->StartApplication(ttstr(project.c_str()));
     } catch (const TJS::eTJS &e) {
         hostLog("ShioriKrkr: startup threw: " + e.GetMessage().AsStdString());
+    } catch (const std::exception &e) {
+        hostLog(std::string("ShioriKrkr: startup threw: ") + e.what());
     } catch (...) {
         hostLog("ShioriKrkr: startup threw");
     }
-    if (result == SDL_APP_FAILURE) {
-        hostLog(std::string("ShioriKrkr: startup failed: ") + SDL_GetError());
+    // StartApplication returns false both when the startup scripts are under way and when they
+    // failed; a failure shows its message box and asks to quit.
+    (void)ok;
+    if (shiori::exitRequested() && !shiori::mainWindowLayer()) {
+        hostLog("ShioriKrkr: startup failed");
         return SHIORIKRKR_ERROR_START;
     }
     h.started = true;
-    h.finished = result == SDL_APP_SUCCESS;
-#if TARGET_OS_IPHONE
-    if (h.hostPresents) {
-        // SDL made its own window over the app's; with the host presenting, nothing shows in it.
-        if (SDL_Window *window = engineWindow()) {
-            UIWindow *uiWindow = (__bridge UIWindow *)SDL_GetPointerProperty(SDL_GetWindowProperties(window),
-                                                                             SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr);
-            uiWindow.hidden = YES;
-        }
-    }
-#endif
     return SHIORIKRKR_OK;
 }
 
 SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
     Host &h = host();
     if (!h.started || h.finished) return 0;
+    if (h.tickDepth > 0) {
+        // Ticked again from inside a modal window's wait (the host's display link keeps
+        // running in the nested run loop): only the engine's step.
+    }
+    ++h.tickDepth;
     // Moves up to and including one button change.
     while (!h.input.empty()) {
         Host::PendingInput next = std::move(h.input.front());
@@ -334,84 +301,58 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
         next.deliver();
         if (next.button) break;
     }
-    SDL_Event event;
-    while (SDL_PollEvent(&event)) {
-        if (SDL_AppEvent(nullptr, &event) != SDL_APP_CONTINUE) h.finished = true;
+    try {
+        ::Application->Run();
+        iTVPTexture2D::RecycleProcess();
+    } catch (const TJS::eTJS &e) {
+        hostLog("ShioriKrkr: frame threw: " + e.GetMessage().AsStdString());
+    } catch (const std::exception &e) {
+        hostLog(std::string("ShioriKrkr: frame threw: ") + e.what());
+    } catch (...) {
+        hostLog("ShioriKrkr: frame threw");
     }
-    if (!h.finished) {
-        try {
-            if (SDL_AppIterate(nullptr) != SDL_APP_CONTINUE) h.finished = true;
-        } catch (const TJS::eTJS &e) {
-            hostLog("ShioriKrkr: frame threw: " + e.GetMessage().AsStdString());
-        } catch (...) {
-            hostLog("ShioriKrkr: frame threw");
-        }
-    }
+    --h.tickDepth;
+    if (shiori::exitRequested() || ::Application->IsTarminate()) h.finished = true;
     return h.finished ? 0 : 1;
 }
 
-SHIORIKRKR_EXPORT void *shiorikrkr_take_view(void) {
-    SDL_Window *window = engineWindow();
-    if (!window) return nullptr;
-    SDL_PropertiesID props = SDL_GetWindowProperties(window);
-#if TARGET_OS_IPHONE
-    UIWindow *uiWindow = (__bridge UIWindow *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr);
-    UIView *view = uiWindow.rootViewController.view;
-    if (view && !host().viewTaken) {
-        host().viewTaken = true;
-        // SDL made its own window over the app's; the host shows the view in its own.
-        uiWindow.hidden = YES;
-    }
-    return (__bridge void *)view;
-#else
-    NSWindow *nsWindow = (__bridge NSWindow *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, nullptr);
-    return (__bridge void *)nsWindow.contentView;
-#endif
-}
-
-// The game's frame with an overlay-mode movie drawn over it at its rectangle (scaled to fit,
-// nearest pixel), recomposed only when either changes.
-static bool composeMovie(shiorikrkr::PresentedFrame &presented) {
-    static std::vector<uint8_t> composed;
-    static uint64_t composedGame = 0, composedMovie = 0, serial = 0;
-    std::lock_guard<std::mutex> lock(shiorikrkr::movieOverlayLock());
-    const shiorikrkr::MovieOverlayFrame *movie = shiorikrkr::movieOverlay();
-    if (!movie || !movie->visible || movie->rgba.empty()) return false;
-    if (presented.serial != composedGame || movie->serial != composedMovie || composed.empty()) {
-        composedGame = presented.serial;
-        composedMovie = movie->serial;
-        composed.assign(presented.pixels, presented.pixels + size_t(presented.pitch) * presented.height);
-        int l = movie->left, t = movie->top, r = movie->right, b = movie->bottom;
-        if (r <= l || b <= t) l = 0, t = 0, r = presented.width, b = presented.height;
-        for (int y = std::max(t, 0); y < std::min(b, presented.height); ++y) {
-            const int sy = (y - t) * movie->height / (b - t);
-            uint8_t *row = &composed[size_t(y) * presented.pitch];
-            const uint8_t *source = &movie->rgba[size_t(sy) * movie->width * 4];
-            for (int x = std::max(l, 0); x < std::min(r, presented.width); ++x) {
-                const int sx = (x - l) * movie->width / (r - l);
-                std::memcpy(row + x * 4, source + sx * 4, 4);
-            }
-        }
-        ++serial;
-    }
-    presented.pixels = composed.data();
-    presented.serial = (uint64_t(1) << 63) | serial;
-    presented.blank = false;
-    return true;
-}
+SHIORIKRKR_EXPORT void *shiorikrkr_take_view(void) { return nullptr; }
 
 SHIORIKRKR_EXPORT int shiorikrkr_frame(shiorikrkr_frame_t *frame) {
     Host &h = host();
-    if (!frame || !h.started || !h.presenter) return 0;
-    shiorikrkr::PresentedFrame presented;
-    if (!h.presenter->frame(presented)) return 0;
-    composeMovie(presented);
-    frame->pixels = presented.pixels;
-    frame->width = presented.width;
-    frame->height = presented.height;
-    frame->pitch = presented.pitch;
-    frame->serial = presented.serial;
-    frame->blank = presented.blank ? 1 : 0;
+    if (!frame || !h.started) return 0;
+    shiori::WindowLayer *window = shiori::activeWindowLayer();
+    iTVPTexture2D *texture = shiori::windowTexture(window);
+    if (!texture) return 0;
+    const uint8_t *pixels = static_cast<const uint8_t *>(texture->GetScanLineForRead(0));
+    if (!pixels) return 0;
+    int w = 0, hgt = 0;
+    shiori::windowCanvasSize(window, w, hgt);
+    if (w <= 0 || hgt <= 0) {
+        w = int(texture->GetWidth());
+        hgt = int(texture->GetHeight());
+    }
+    w = std::min<int>(w, int(texture->GetWidth()));
+    hgt = std::min<int>(hgt, int(texture->GetHeight()));
+    frame->pixels = pixels;
+    frame->width = w;
+    frame->height = hgt;
+    frame->pitch = texture->GetPitch();
+    frame->serial = shiori::windowFrameSerial(window);
+    frame->format = SHIORIKRKR_FRAME_BGRA;
+    frame->texture = nullptr;
+    // A coarse look for anything not black: the host lifts its launch cover on the first such
+    // frame (the game's first frames are black while its title loads).
+    bool blank = true;
+    for (int sy = 1; sy < 16 && blank; ++sy)
+        for (int sx = 1; sx < 16; ++sx) {
+            const uint8_t *p = pixels + size_t(sy * hgt / 16) * frame->pitch + size_t(sx * w / 16) * 4;
+            if (p[0] > 8 || p[1] > 8 || p[2] > 8) {
+                blank = false;
+                break;
+            }
+        }
+    frame->blank = blank ? 1 : 0;
     return 1;
 }
 
@@ -435,25 +376,24 @@ SHIORIKRKR_EXPORT uint32_t shiorikrkr_cursor(const uint8_t **rgba, int32_t *widt
 }
 
 SHIORIKRKR_EXPORT void shiorikrkr_canvas_size(int32_t *width, int32_t *height) {
-    std::string w, h;
-    const bool ok = evaluate("Window.mainWindow !== void ? Window.mainWindow.innerWidth : 0", w) == 0 &&
-                    evaluate("Window.mainWindow !== void ? Window.mainWindow.innerHeight : 0", h) == 0;
-    if (width) *width = ok ? std::atoi(w.c_str()) : 0;
-    if (height) *height = ok ? std::atoi(h.c_str()) : 0;
+    int w = 0, h = 0;
+    shiori::windowCanvasSize(shiori::activeWindowLayer(), w, h);
+    if (width) *width = w;
+    if (height) *height = h;
 }
 
 SHIORIKRKR_EXPORT void shiorikrkr_pointer(int32_t phase, float x, float y, int32_t button) {
-    if (!host().started) return;
+    Host &h = host();
+    if (!h.started) return;
     int px = 0, py = 0;
-    windowPoint(x, y, px, py);
-    auto &queue = host().input;
-    const tTVPMouseButton which = mouseButton(button);
-    auto move = [px, py] { krkrsdl3::KRKR_Trig_MouseMove(px, py); };
+    canvasPoint(x, y, px, py);
+    auto &queue = h.input;
+    auto move = [px, py] { shiori::pointerMove(px, py); };
     switch (phase) {
     case SHIORIKRKR_POINTER_DOWN:
         // The move this tick; the press the next.
         queue.push_back({true, move});
-        queue.push_back({true, [which, px, py] { krkrsdl3::KRKR_Trig_MouseDown(which, px, py); }});
+        queue.push_back({true, [button, px, py] { shiori::pointerDown(button, px, py); }});
         break;
     case SHIORIKRKR_POINTER_MOVED:
         if (queue.empty()) move();
@@ -470,16 +410,16 @@ SHIORIKRKR_EXPORT void shiorikrkr_pointer(int32_t phase, float x, float y, int32
             }
         }
         if (!dropped)
-            queue.push_back({true, [which] {
-                krkrsdl3::KRKR_Trig_MouseMove(-10000, -10000);
-                krkrsdl3::KRKR_Trig_MouseUp(which, -10000, -10000);
+            queue.push_back({true, [button] {
+                shiori::pointerMove(-10000, -10000);
+                shiori::pointerUp(button, -10000, -10000);
             }});
         break;
     }
     case SHIORIKRKR_POINTER_UP:
-        queue.push_back({true, [which, px, py] {
-            krkrsdl3::KRKR_Trig_MouseMove(px, py);
-            krkrsdl3::KRKR_Trig_MouseUp(which, px, py);
+        queue.push_back({true, [button, px, py] {
+            shiori::pointerMove(px, py);
+            shiori::pointerUp(button, px, py);
         }});
         break;
     }
@@ -488,16 +428,15 @@ SHIORIKRKR_EXPORT void shiorikrkr_pointer(int32_t phase, float x, float y, int32
 SHIORIKRKR_EXPORT void shiorikrkr_wheel(float dy, float x, float y) {
     if (!host().started) return;
     int px = 0, py = 0;
-    windowPoint(x, y, px, py);
-    krkrsdl3::KRKR_Trig_MouseScroll(0, static_cast<int>(dy), px, py);
+    canvasPoint(x, y, px, py);
+    // KiriKiri's wheel delta: 120 a notch, negative towards the user (scrolling up is positive).
+    shiori::wheel(int(dy * 120), px, py);
 }
 
 SHIORIKRKR_EXPORT void shiorikrkr_key(int32_t virtualKey, int32_t down) {
-    if (!host().started) return;
-    const SDL_Scancode code = scancodeForVirtualKey(virtualKey);
-    if (code == SDL_SCANCODE_UNKNOWN) return;
-    if (down) krkrsdl3::KRKR_Trig_KeyDown(code);
-    else krkrsdl3::KRKR_Trig_KeyUp(code);
+    if (!host().started || !knownKey(virtualKey)) return;
+    if (down) shiori::keyDown(virtualKey);
+    else shiori::keyUp(virtualKey);
 }
 
 SHIORIKRKR_EXPORT int shiorikrkr_eval(const char *expression, char *out, uint32_t capacity) {
@@ -525,7 +464,8 @@ SHIORIKRKR_EXPORT int shiorikrkr_capture(const char *path) {
         " var p = w.primaryLayer; var l = new Layer(w, p);"
         " l.setImageSize(p.width, p.height); l.setSizeToImageSize();"
         " l.piledCopy(0, 0, p, 0, 0, p.width, p.height);"
-        " l.saveLayerImage(path, 'bmp'); invalidate l; return 'ok'; })(\"" + escaped + "\")";
+        " l.saveLayerImage(path, 'bmp'); invalidate l; return 'ok'; })(\"" +
+        escaped + "\")";
     std::string text;
     const int status = evaluate(script, text);
     if (status != 0 || text != "ok") {
@@ -538,18 +478,18 @@ SHIORIKRKR_EXPORT int shiorikrkr_capture(const char *path) {
 SHIORIKRKR_EXPORT void shiorikrkr_stop(void) {
     Host &h = host();
     if (!h.started) return;
-    SDL_AppQuit(nullptr, SDL_APP_SUCCESS); // deletes the render backend (the presenter)
-    h.presenter = nullptr;
-    TVPHostRenderBackendFactory = nullptr;
-    TVPHostMessageBox = nullptr;
-    TVPHostMouseCursor = nullptr;
-    shiorikrkr::setEmoteHost(nullptr);
+    try {
+        if (!TVPSystemUninitCalled) TVPSystemUninit();
+    } catch (...) {
+        hostLog("ShioriKrkr: shutdown threw");
+    }
+    shiori::audioShutdown();
+    shiori::cursorChanged = nullptr;
     h.cursorFiles.clear();
     h.input.clear();
     h.cursor = 0;
     TVPXP3FilterOnlyFlaggedMembers = false;
     TVPSetXP3ArchiveExtractionFilter(nullptr);
-    TVPSetOnLog(nullptr);
     h.cx.reset();
     h.neko = {};
     h.started = false;

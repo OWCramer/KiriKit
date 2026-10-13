@@ -13,7 +13,7 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 
-#define NCB_MODULE_NAME TJS_N("getLangName.dll")
+#define NCB_MODULE_NAME TJS_W("getLangName.dll")
 
 namespace {
 
