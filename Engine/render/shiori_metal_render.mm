@@ -44,6 +44,12 @@
 #include <unordered_map>
 #include <vector>
 
+// krkr2's Photoshop-style blend tables (gl/blend_function.cpp).
+struct ps_soft_light_table { static unsigned char TABLE[256][256]; };
+struct ps_color_dodge_table { static unsigned char TABLE[256][256]; };
+struct ps_color_burn_table { static unsigned char TABLE[256][256]; };
+struct ps_overlay_table { static unsigned char TABLE[256][256]; };
+
 extern "C" {
 extern unsigned char TVPOpacityOnOpacityTable[256 * 256];
 extern unsigned char TVPNegativeMulTable[256 * 256];
@@ -91,8 +97,17 @@ struct Device {
         return true;
     }
 
+    id<MTLBuffer> psTables = nil;
+
     void ensureTables() {
         if (ooo) return;
+        // The Photoshop-style blends' tables (krkr2's, filled at start-up).
+        psTables = [device newBufferWithLength:4 * 65536 options:MTLResourceStorageModeShared];
+        auto *t = static_cast<uint8_t *>(psTables.contents);
+        memcpy(t, ps_soft_light_table::TABLE, 65536);
+        memcpy(t + 65536, ps_color_dodge_table::TABLE, 65536);
+        memcpy(t + 131072, ps_color_burn_table::TABLE, 65536);
+        memcpy(t + 196608, ps_overlay_table::TABLE, 65536);
         ooo = [device newBufferWithBytes:TVPOpacityOnOpacityTable length:sizeof(TVPOpacityOnOpacityTable)
                                  options:MTLResourceStorageModeShared];
         negmul = [device newBufferWithBytes:TVPNegativeMulTable length:sizeof(TVPNegativeMulTable)
@@ -357,6 +372,22 @@ Kind kindOf(const std::string &name) {
         {"UnivTransBlend", {Shape::Univ, OpUniv, 0}},
         {"UnivTransBlend_d", {Shape::Univ, OpUnivD, 0}},
         {"UnivTransBlend_a", {Shape::Univ, OpUnivA, 0}},
+        {"PsAlphaBlend", {Shape::BltAndOpa, OpPs + PsAlpha, OpPsOpa + PsAlpha}},
+        {"PsAddBlend", {Shape::BltAndOpa, OpPs + PsAdd, OpPsOpa + PsAdd}},
+        {"PsSubBlend", {Shape::BltAndOpa, OpPs + PsSub, OpPsOpa + PsSub}},
+        {"PsMulBlend", {Shape::BltAndOpa, OpPs + PsMul, OpPsOpa + PsMul}},
+        {"PsScreenBlend", {Shape::BltAndOpa, OpPs + PsScreen, OpPsOpa + PsScreen}},
+        {"PsOverlayBlend", {Shape::BltAndOpa, OpPs + PsOverlay, OpPsOpa + PsOverlay}},
+        {"PsHardLightBlend", {Shape::BltAndOpa, OpPs + PsHardLight, OpPsOpa + PsHardLight}},
+        {"PsSoftLightBlend", {Shape::BltAndOpa, OpPs + PsSoftLight, OpPsOpa + PsSoftLight}},
+        {"PsColorDodgeBlend", {Shape::BltAndOpa, OpPs + PsColorDodge, OpPsOpa + PsColorDodge}},
+        {"PsColorDodge5Blend", {Shape::BltAndOpa, OpPs + PsColorDodge5, OpPsOpa + PsColorDodge5}},
+        {"PsColorBurnBlend", {Shape::BltAndOpa, OpPs + PsColorBurn, OpPsOpa + PsColorBurn}},
+        {"PsLightenBlend", {Shape::BltAndOpa, OpPs + PsLighten, OpPsOpa + PsLighten}},
+        {"PsDarkenBlend", {Shape::BltAndOpa, OpPs + PsDarken, OpPsOpa + PsDarken}},
+        {"PsDiffBlend", {Shape::BltAndOpa, OpPs + PsDiff, OpPsOpa + PsDiff}},
+        {"PsDiff5Blend", {Shape::BltAndOpa, OpPs + PsDiff5, OpPsOpa + PsDiff5}},
+        {"PsExclusionBlend", {Shape::BltAndOpa, OpPs + PsExclusion, OpPsOpa + PsExclusion}},
         {"BoxBlur", {Shape::Blur, OpBoxBlurRows, 0}},
         {"BoxBlurAlpha", {Shape::Blur, OpBoxBlurRows, 0}},
     };
@@ -992,6 +1023,7 @@ private:
         [e setBytes:table ? table : none length:sizeof(none) atIndex:7];
         [e setBuffer:t offset:0 atIndex:8];
         [e setBuffer:temp ? temp : t offset:0 atIndex:9];
+        [e setBuffer:g.psTables offset:0 atIndex:10];
         [e dispatchThreads:MTLSizeMake(p.width, p.height, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
         tar->MarkUsed(serial);
         if (src) src->MarkUsed(serial);

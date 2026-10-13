@@ -24,6 +24,14 @@ enum Op : unsigned {
     OpConstColorAlphaA, OpRemoveConstOpacity,
     OpUniv = 60, OpUnivSwitch, OpUnivD, OpUnivSwitchD, OpUnivA, OpUnivSwitchA,
     OpBoxBlurRows = 70, OpBoxBlurColumns, // a box blur's two passes (sums through the temp buffer)
+    // Photoshop-style blends keeping the target's alpha: OpPs + kind, OpPsOpa + kind with opacity.
+    OpPs = 80, OpPsOpa = 96,
+};
+
+// The Photoshop-style kinds, in krkr2's order of their names.
+enum PsKind : unsigned {
+    PsAlpha, PsAdd, PsSub, PsMul, PsScreen, PsOverlay, PsHardLight, PsSoftLight, PsColorDodge, PsColorDodge5,
+    PsColorBurn, PsLighten, PsDarken, PsDiff, PsDiff5, PsExclusion,
 };
 
 // Parameters, laid out the same in C++ and MSL. Offsets and pitches count elements (32-bit
@@ -190,6 +198,75 @@ static inline uint sampled(device const uint *src, constant KernelParams &p, uin
     return bilinear(src, p, sx, sy);
 }
 
+// The Photoshop-style blends (KiriKiri's Kenjo blender): s's colour blended into d by a/256.
+static inline uint psMix(uint d, uint s, uint a) {
+    uint d1 = d & 0x00ff00ffu, d2 = d & 0x0000ff00u;
+    return (((((s & 0x00ff00ffu) - d1) * a) >> 8) + d1) & 0x00ff00ffu | (((((s & 0x0000ff00u) - d2) * a) >> 8) + d2) & 0x0000ff00u;
+}
+
+// Per channel through a 256 x 256 table (indexed [first][second]).
+static inline uint psTable(device const uchar *t, uint first, uint second) {
+    return (uint(t[((first >> 16) & 0xffu) * 256 + ((second >> 16) & 0xffu)]) << 16) |
+        (uint(t[((first >> 8) & 0xffu) * 256 + ((second >> 8) & 0xffu)]) << 8) |
+        uint(t[(first & 0xffu) * 256 + (second & 0xffu)]);
+}
+
+// Tables: soft light, colour dodge, colour burn, overlay (64 KiB each).
+static inline uint psBlend(uint kind, uint d, uint s, uint a, device const uchar *tables) {
+    device const uchar *softLight = tables, *colorDodge = tables + 65536, *colorBurn = tables + 131072,
+                       *overlay = tables + 196608;
+    uint n;
+    switch (kind) {
+    case 0: return psMix(d, s, a);
+    case 1:
+        n = (((d & s) << 1) + ((d ^ s) & 0x00fefefeu)) & 0x01010100u;
+        n = ((n >> 8) + 0x007f7f7fu) ^ 0x007f7f7fu;
+        return psMix(d, (d + s - n) | n, a);
+    case 2:
+        s = ~s;
+        n = (((~d & s) << 1) + ((~d ^ s) & 0x00fefefeu)) & 0x01010100u;
+        n = ((n >> 8) + 0x007f7f7fu) ^ 0x007f7f7fu;
+        return psMix(d, (d | n) - (s | n), a);
+    case 3:
+        s = (((((d >> 16) & 0xffu) * (s & 0x00ff0000u)) & 0xff000000u) | ((((d >> 8) & 0xffu) * (s & 0x0000ff00u)) & 0x00ff0000u) |
+             (((d >> 0) & 0xffu) * (s & 0x000000ffu))) >> 8;
+        return psMix(d, s, a);
+    case 4: {
+        uint sd1 = (((((d >> 16) & 0xffu) * (s & 0x00ff0000u)) & 0xff000000u) | (((d >> 0) & 0xffu) * (s & 0x000000ffu))) >> 8;
+        uint sd2 = (((((d >> 8) & 0xffu) * (s & 0x0000ff00u)) & 0x00ff0000u)) >> 8;
+        return ((((((s & 0x00ff00ffu) - sd1) * a) >> 8) + (d & 0x00ff00ffu)) & 0x00ff00ffu) |
+            ((((((s & 0x0000ff00u) - sd2) * a) >> 8) + (d & 0x0000ff00u)) & 0x0000ff00u);
+    }
+    case 5: return psMix(d, psTable(overlay, s, d), a);
+    case 6: return psMix(d, psTable(overlay, d, s), a);
+    case 7: return psMix(d, psTable(softLight, s, d), a);
+    case 8: return psMix(d, psTable(colorDodge, s, d), a);
+    case 9:
+        s = ((((s & 0x00ff00ffu) * a) >> 8) & 0x00ff00ffu) | ((((s & 0x0000ff00u) * a) >> 8) & 0x0000ff00u);
+        return psTable(colorDodge, s, d);
+    case 10: return psMix(d, psTable(colorBurn, s, d), a);
+    case 11:
+    case 12:
+    case 13:
+        n = (((~d & s) << 1) + ((~d ^ s) & 0x00fefefeu)) & 0x01010100u;
+        n = ((n >> 8) + 0x007f7f7fu) ^ 0x007f7f7fu;
+        if (kind == 11) return psMix(d, (s & n) | (d & ~n), a);
+        if (kind == 12) return psMix(d, (d & n) | (s & ~n), a);
+        return psMix(d, ((s & n) - (d & n)) | ((d & ~n) - (s & ~n)), a);
+    case 14:
+        s = ((((s & 0x00ff00ffu) * a) >> 8) & 0x00ff00ffu) | ((((s & 0x0000ff00u) * a) >> 8) & 0x0000ff00u);
+        n = (((~d & s) << 1) + ((~d ^ s) & 0x00fefefeu)) & 0x01010100u;
+        n = ((n >> 8) + 0x007f7f7fu) ^ 0x007f7f7fu;
+        return ((s & n) - (d & n)) | ((d & ~n) - (s & ~n));
+    default: {
+        uint sd1 = (((((d >> 16) & 0xffu) * ((s & 0x00ff0000u) >> 7)) & 0x01ff0000u) | ((((d >> 0) & 0xffu) * (s & 0x000000ffu)) >> 7));
+        uint sd2 = (((((d >> 8) & 0xffu) * (s & 0x0000ff00u)) & 0x00ff8000u)) >> 7;
+        return ((((((s & 0x00ff00ffu) - sd1) * a) >> 8) + (d & 0x00ff00ffu)) & 0x00ff00ffu) |
+            ((((((s & 0x0000ff00u) - sd2) * a) >> 8) + (d & 0x0000ff00u)) & 0x0000ff00u);
+    }
+    }
+}
+
 // Reflect-101 edges (… 2 1 | 0 1 2 … n-2 n-1 | n-2 …).
 static inline int reflect101(int i, int n) {
     if (n == 1) return 0;
@@ -207,6 +284,7 @@ kernel void shioriLayerOp(device uint *tar [[buffer(0)]],
                           constant uint *table [[buffer(7)]],
                           device uchar *tar8 [[buffer(8)]],
                           device uint4 *temp [[buffer(9)]],
+                          device const uchar *psTables [[buffer(10)]],
                           uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= p.width || gid.y >= p.height) return;
     if (p.op == 70 || p.op == 71) {
@@ -235,7 +313,15 @@ kernel void shioriLayerOp(device uint *tar [[buffer(0)]],
     uint si = p.srcOffset + gid.y * p.srcPitch + gid.x;
     uint di = p.dstOffset + gid.y * p.dstPitch + gid.x;
     uint opa = p.opa;
-    uint sv = p.op < 40 ? (p.sample ? sampled(src, p, gid) : src[si]) : 0;
+    uint sv = (p.op < 40 || p.op >= 80) ? (p.sample ? sampled(src, p, gid) : src[si]) : 0;
+    if (p.op >= 80) {
+        // Photoshop-style, the target's alpha kept.
+        uint d = tar[ti];
+        uint kind = p.op >= 96 ? p.op - 96 : p.op - 80;
+        uint a = p.op >= 96 ? ((sv >> 24) * opa) >> 8 : sv >> 24;
+        tar[ti] = (psBlend(kind, d, sv, a, psTables) & 0x00ffffffu) | (d & 0xff000000u);
+        return;
+    }
     uint r;
     switch (p.op) {
     // ---- tar = f(tar, src)
