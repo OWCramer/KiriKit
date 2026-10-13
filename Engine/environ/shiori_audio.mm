@@ -31,6 +31,12 @@ namespace {
 class Mixer;
 Mixer *theMixer = nullptr;
 
+// SHIORIKRKR_TRACE_AUDIO=1: each stream's play, pause, stop and reset, with what it had queued.
+bool tracing() {
+    static const bool on = getenv("SHIORIKRKR_TRACE_AUDIO") != nullptr;
+    return on;
+}
+
 // One queued buffer, already converted to float stereo at the stream's own sample rate.
 struct Chunk {
     std::vector<float> frames; // interleaved L R
@@ -40,18 +46,30 @@ struct Chunk {
 class Stream final : public iTVPSoundBuffer {
 public:
     explicit Stream(const tTVPWaveFormat &format, int bufferCount)
-        : Format(format), BufferCount(std::max(bufferCount, 1)) {}
+        : Format(format), BufferCount(std::max(bufferCount, 1)) {
+        static int next = 0;
+        Id = ++next;
+        trace("new " + std::to_string(Format.SamplesPerSec) + " Hz x" + std::to_string(Format.Channels));
+    }
     ~Stream() override;
 
     void Release() override { delete this; }
 
-    void Play() override { Playing = true; }
-    void Pause() override { Playing = false; }
+    void Play() override {
+        trace("play");
+        Playing = true;
+    }
+    void Pause() override {
+        trace("pause");
+        Playing = false;
+    }
     void Stop() override {
+        trace("stop");
         Playing = false;
         Reset();
     }
     void Reset() override {
+        trace("reset");
         std::lock_guard<std::mutex> lock(Lock);
         Chunks.clear();
         Cursor = 0;
@@ -149,6 +167,19 @@ public:
     }
 
 private:
+    void trace(const std::string &what) {
+        if (!tracing()) return;
+        size_t queued = 0;
+        {
+            std::lock_guard<std::mutex> lock(Lock);
+            for (const Chunk &c : Chunks) queued += c.count();
+        }
+        shiori::log("audio " + std::to_string(Id) + ": " + what + " (playing " + std::to_string(int(Playing.load())) +
+                    ", played " + std::to_string(PlayedSamples) + ", queued " + std::to_string(queued) + ")");
+    }
+
+    int Id = 0;
+
     float sample(const uint8_t *p) const {
         if (Format.IsFloat) {
             float f;

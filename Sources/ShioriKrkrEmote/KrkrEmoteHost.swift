@@ -181,6 +181,10 @@ public final class KrkrEmoteHost {
             return (0, label == "chara" ? model?.baseObject ?? "" : model?.baseMotion ?? "")
         case "loop": return (p.loops(label) ? 1 : 0, nil)
         case "length": return (p.length(label), nil)
+        case "contains":
+            let hit = n.count >= 2 && p.contains(label, x: n[0], y: n[1])
+            if trace { FileHandle.standardError.write("emote host: contains \(label) (\(n)) -> \(hit)\n".data(using: .utf8)!) }
+            return (hit ? 1 : 0, nil)
         default: return (0, nil)
         }
     }

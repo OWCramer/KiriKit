@@ -356,8 +356,10 @@ public:
     void mouseUp(tTVPMouseButton button, int x, int y, bool click) {
         lastX = x;
         lastY = y;
-        const tjs_uint32 shift = TVPGetCurrentShiftKeyState();
         scancode[vkForButton(button)] &= 0x10;
+        // As Windows reports a button-up: without the button that went up (so the layer that
+        // took the mouse on the way down lets it go).
+        const tjs_uint32 shift = TVPGetCurrentShiftKeyState();
         if (!Instance) return;
         if (click) TVPPostInputEvent(new tTVPOnClickInputEvent(Instance, x, y));
         TVPPostInputEvent(new tTVPOnMouseUpInputEvent(Instance, x, y, button, shift));

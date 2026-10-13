@@ -302,6 +302,22 @@ public final class KrkrEmotePlayer {
                 tx: A * x + C * y + TX, ty: B * x + D * y + TY)
     }
 
+    /// Whether (x, y), in the player's coordinates (before the layer's matrix), is inside the
+    /// shape layer `label` (a hit area such as `hit_head`) as currently posed; with no label,
+    /// inside any shape layer.
+    public func contains(_ label: String, x: Double, y: Double) -> Bool {
+        let place = placement([1, 0, 0, 1, 0, 0])
+        let pose = self.pose()
+        for (i, renderer) in renderers.enumerated() {
+            var variables = pose
+            models[i].applySelectors(&variables)
+            let shapes = renderer.shapes(variables: variables, transform: place)
+            let candidates = label.isEmpty ? shapes.values.flatMap { $0 } : shapes[label] ?? []
+            if candidates.contains(where: { $0.contains(x, y) }) { return true }
+        }
+        return false
+    }
+
     var tint: (r: Double, g: Double, b: Double, a: Double) {
         (red.current(clock), green.current(clock), blue.current(clock), alpha.current(clock))
     }
