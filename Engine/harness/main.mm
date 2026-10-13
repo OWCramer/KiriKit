@@ -115,6 +115,7 @@ int main(int argc, char **argv) {
         bool present = false;
         int sessions = 1; // --again: leave the game and start it again in the same process
         std::multimap<int, std::pair<float, float>> clicks;
+        std::multimap<int, int> keys; // --key FRAME:VK (hex or decimal): pressed, then let go after a few ticks
         std::multimap<int, std::string> evals, captures;
         std::vector<std::string> options;
         auto split = [](const std::string &s) {
@@ -142,6 +143,9 @@ int main(int argc, char **argv) {
                 float x = 0, y = 0;
                 std::sscanf(rest.c_str(), "%f,%f", &x, &y);
                 clicks.emplace(frame, std::make_pair(x, y));
+            } else if (a == "--key") {
+                auto [frame, rest] = split(next());
+                keys.emplace(frame, int(std::strtol(rest.c_str(), nullptr, 0)));
             } else if (a == "--eval") {
                 auto [frame, rest] = split(next());
                 evals.emplace(frame, rest);
@@ -256,6 +260,12 @@ int main(int argc, char **argv) {
                 shiorikrkr_pointer(SHIORIKRKR_POINTER_DOWN, it->second.first, it->second.second, SHIORIKRKR_BUTTON_LEFT);
                 shiorikrkr_tick();
                 shiorikrkr_pointer(SHIORIKRKR_POINTER_UP, it->second.first, it->second.second, SHIORIKRKR_BUTTON_LEFT);
+            }
+            for (auto it = keys.lower_bound(frame); it != keys.upper_bound(frame); ++it) {
+                std::printf("== frame %d: key 0x%02X\n", frame, it->second);
+                shiorikrkr_key(it->second, 1);
+                for (int i = 0; i < 6; ++i) shiorikrkr_tick(); // as a held key (the app holds keys at least 0.1 s)
+                shiorikrkr_key(it->second, 0);
             }
             for (auto it = evals.lower_bound(frame); it != evals.upper_bound(frame); ++it) {
                 const int r = shiorikrkr_eval(it->second.c_str(), buffer, sizeof buffer);

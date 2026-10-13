@@ -129,9 +129,16 @@ public:
         x = lastX;
         y = lastY;
     }
+    // The game moves the pointer (KAG does so for the arrow keys and a pad, onto the next button):
+    // as on a PC, where the cursor moving sends the window a mouse move, the layers under it hear
+    // one, so the button under it lights up and Enter presses the button that's lit.
     void SetCursorPos(tjs_int x, tjs_int y) override {
+        const bool moved = x != lastX || y != lastY;
         lastX = x;
         lastY = y;
+        if (moved && Instance)
+            TVPPostInputEvent(new tTVPOnMouseMoveInputEvent(Instance, x, y, TVPGetCurrentShiftKeyState()),
+                              TVP_EPT_DISCARDABLE);
     }
     void SetHintText(const ttstr &) override {}
     void SetAttentionPoint(tjs_int, tjs_int, const struct tTVPFont *) override {}
