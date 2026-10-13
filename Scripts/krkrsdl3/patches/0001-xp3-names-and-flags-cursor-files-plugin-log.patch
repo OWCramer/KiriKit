@@ -1,5 +1,5 @@
 diff --git a/core/archive/XP3Archive.cpp b/core/archive/XP3Archive.cpp
-index 7612aff..fb33b02 100644
+index 7612aff..c6de38d 100644
 --- a/core/archive/XP3Archive.cpp
 +++ b/core/archive/XP3Archive.cpp
 @@ -21,6 +21,8 @@
@@ -19,7 +19,7 @@ index 7612aff..fb33b02 100644
  void TVPSetXP3ArchiveContentFilter(tTVPXP3ArchiveContentFilter filter)
  {
      TVPXP3ArchiveContentFilter = filter;
-@@ -256,6 +259,79 @@ void tTVPXP3Archive::Init(tTJSBinaryStream* st, tjs_int64 off, bool normalizeNam
+@@ -256,6 +259,85 @@ void tTVPXP3Archive::Init(tTJSBinaryStream* st, tjs_int64 off, bool normalizeNam
                  TVPThrowExceptionMessage(TVPReadError);
              }
  
@@ -31,6 +31,11 @@ index 7612aff..fb33b02 100644
 +            static const tjs_uint8 cn_neko[] = {0x6e /*'n'*/, 0x65 /*'e'*/, 0x6b /*'k'*/, 0x6f /*'o'*/};
 +            static const tjs_uint8 cn_elif[] = {0x65 /*'e'*/, 0x6c /*'l'*/, 0x69 /*'i'*/, 0x46 /*'F'*/};
 +            std::unordered_map<tjs_uint32, ttstr> hashed_names;
++            // Every name a hash has, in index order: entries with identical contents share a
++            // hash, and where the name chunks aren't next to their File chunks (NEKOPARA Vol. 2)
++            // the n-th such entry takes the n-th name.
++            std::unordered_map<tjs_uint32, std::vector<ttstr>> names_by_hash;
++            std::unordered_map<tjs_uint32, size_t> names_used;
 +            std::unordered_set<std::string> hashed_name_set; // normalized
 +            bool neko_names = false;
 +            for (const tjs_uint8* cn_names : {cn_hnfn, cn_neko, cn_elif})
@@ -50,6 +55,7 @@ index 7612aff..fb33b02 100644
 +                            ttstr real = TVPStringFromBMPUnicode(
 +                                (const tjs_uint16*)(indexdata + ch_start + 6), len);
 +                            hashed_names[hash] = real;
++                            names_by_hash[hash].push_back(real);
 +                            NormalizeInArchiveStorageName(real);
 +                            hashed_name_set.insert(real.AsStdString());
 +                        }
@@ -99,7 +105,7 @@ index 7612aff..fb33b02 100644
              // read index information from memory
              tjs_uint ch_file_start = 0;
              tjs_uint ch_file_size = index_size;
-@@ -266,6 +342,8 @@ void tTVPXP3Archive::Init(tTJSBinaryStream* st, tjs_int64 off, bool normalizeNam
+@@ -266,6 +348,8 @@ void tTVPXP3Archive::Init(tTJSBinaryStream* st, tjs_int64 off, bool normalizeNam
                  if (!FindChunk(indexdata, cn_File, ch_file_start, ch_file_size))
                      break; // not found
  
@@ -108,7 +114,7 @@ index 7612aff..fb33b02 100644
                  // find 'info' sub-chunk
                  tjs_uint ch_info_start = ch_file_start;
                  tjs_uint ch_info_size = ch_file_size;
-@@ -277,6 +355,7 @@ void tTVPXP3Archive::Init(tTJSBinaryStream* st, tjs_int64 off, bool normalizeNam
+@@ -277,6 +361,7 @@ void tTVPXP3Archive::Init(tTJSBinaryStream* st, tjs_int64 off, bool normalizeNam
                  tjs_uint32 flags = ReadI32FromMem(indexdata + ch_info_start + 0);
                  if (!TVPAllowExtractProtectedStorage && (flags & TVP_XP3_FILE_PROTECTED))
                      TVPThrowExceptionMessage(TVPSpecifiedStorageHadBeenProtected);
@@ -116,7 +122,7 @@ index 7612aff..fb33b02 100644
                  item.OrgSize = ReadI64FromMem(indexdata + ch_info_start + 4);
                  item.ArcSize = ReadI64FromMem(indexdata + ch_info_start + 12);
  
-@@ -331,14 +410,36 @@ void tTVPXP3Archive::Init(tTJSBinaryStream* st, tjs_int64 off, bool normalizeNam
+@@ -331,14 +416,43 @@ void tTVPXP3Archive::Init(tTJSBinaryStream* st, tjs_int64 off, bool normalizeNam
  
                  // read 'aldr' sub-chunk
                  item.FileHash = ReadI32FromMem(indexdata + ch_adlr_start);
@@ -127,7 +133,14 @@ index 7612aff..fb33b02 100644
 +                    auto real = hashed_names.find(item.FileHash);
 +                    if (positional != names_by_position.end() || real != hashed_names.end())
 +                    {
-+                        item.Name = positional != names_by_position.end() ? positional->second : real->second;
++                        if (positional != names_by_position.end())
++                            item.Name = positional->second;
++                        else
++                        {
++                            const auto& all = names_by_hash[item.FileHash];
++                            size_t& used = names_used[item.FileHash];
++                            item.Name = used < all.size() ? all[used++] : real->second;
++                        }
 +                        if (normalizeName)
 +                            NormalizeInArchiveStorageName(item.Name);
 +                    }
@@ -155,7 +168,7 @@ index 7612aff..fb33b02 100644
              }
  
              if (!(index_flag & TVP_XP3_INDEX_CONTINUE))
-@@ -887,7 +988,8 @@ tjs_uint tTVPXP3ArchiveStream::Read(void* buffer, tjs_uint read_size)
+@@ -887,7 +1001,8 @@ tjs_uint tTVPXP3ArchiveStream::Read(void* buffer, tjs_uint read_size)
          }
  
          // execute filter (for encryption method)
