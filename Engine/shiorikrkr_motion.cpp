@@ -277,6 +277,65 @@ tTJSNI_BaseLayer *layerOf(iTJSDispatch2 *object) {
 }
 } // namespace
 
+// Motion.D3DAdaptor: the canvas the Direct3D path draws characters on (NEKOPARA Extra and
+// Vol. 4 take it): players draw into it, captureCanvas copies it into a layer and starts the
+// next frame clear.
+class ShioriD3DAdaptor {
+public:
+    ShioriD3DAdaptor(iTJSDispatch2 *, tjs_int width, tjs_int height, tjs_int left, tjs_int top)
+        : width_(std::max<tjs_int>(width, 0)), height_(std::max<tjs_int>(height, 0)),
+          pixels_(size_t(width_) * height_ * 4, 0) {
+        if (getenv("SHIORIKRKR_TRACE_EMOTE"))
+            fprintf(stderr, "D3DAdaptor %d,%d %dx%d\n", int(left), int(top), int(width), int(height));
+    }
+    void setClearColor(tjs_uint32 argb) {
+        clear_ = argb;
+        clearCanvas();
+    }
+    void captureCanvas(iTJSDispatch2 *target);
+    void unloadUnusedTextures() {}
+
+    uint8_t *pixels() { return pixels_.data(); }
+    // Only the rectangle the host reports is read back, and the host writes all of it.
+    uint8_t *scratch() {
+        if (scratch_.size() != pixels_.size()) scratch_.resize(pixels_.size());
+        return scratch_.data();
+    }
+    // The scratch image's rectangle over the canvas (straight alpha, source over).
+    void blendScratch(const int32_t *bounds) {
+        const int x0 = std::max(0, int(bounds[0])), y0 = std::max(0, int(bounds[1]));
+        const int x1 = std::min(width_, int(bounds[2])), y1 = std::min(height_, int(bounds[3]));
+        for (int y = y0; y < y1; ++y) {
+            const uint8_t *s = &scratch_[(size_t(y) * width_ + x0) * 4];
+            uint8_t *d = &pixels_[(size_t(y) * width_ + x0) * 4];
+            for (int x = x0; x < x1; ++x, s += 4, d += 4) {
+                const int sa = s[3];
+                if (sa == 0) continue;
+                if (sa == 255 || d[3] == 0) {
+                    memcpy(d, s, 4);
+                    continue;
+                }
+                const int da = d[3] * (255 - sa) / 255, oa = sa + da;
+                for (int c = 0; c < 3; ++c) d[c] = uint8_t((s[c] * sa + d[c] * da + oa / 2) / oa);
+                d[3] = uint8_t(oa);
+            }
+        }
+    }
+    int width() const { return width_; }
+    int height() const { return height_; }
+
+private:
+    void clearCanvas() {
+        // ARGB to the R, G, B, A krkr2 keeps pixels in.
+        const uint8_t px[4] = {uint8_t(clear_ >> 16), uint8_t(clear_ >> 8), uint8_t(clear_), uint8_t(clear_ >> 24)};
+        for (size_t i = 0; i < pixels_.size(); i += 4) memcpy(&pixels_[i], px, 4);
+    }
+
+    int width_, height_;
+    std::vector<uint8_t> pixels_, scratch_;
+    tjs_uint32 clear_ = 0;
+};
+
 // Motion.EmotePlayer: an E-mote character drawn into a layer.
 class ShioriLayerEmotePlayer {
 public:
@@ -330,6 +389,24 @@ public:
     // draw(layer or adaptor): the character into the layer's image, through the affine the
     // game set (setDrawAffineTranslateMatrix).
     void draw(iTJSDispatch2 *target) {
+        if (auto *canvas = target ? ncbInstanceAdaptor<ShioriD3DAdaptor>::GetNativeInstance(target) : nullptr) {
+            if (!ensure() || !host() || !canvas->width() || !canvas->height()) return;
+            hostCommand(player(), "show");
+            int32_t bounds[4] = {0, 0, 0, 0};
+            const auto drawStart = std::chrono::steady_clock::now();
+            // Into a scratch image, then over what the canvas holds (several characters
+            // share one canvas; the host writes its whole covered rectangle).
+            uint8_t *scratch = canvas->scratch();
+            const int drew = host()->draw(host()->context, player(), scratch, canvas->width(), canvas->height(),
+                         canvas->width() * 4, affine_, bounds);
+            if (drew) canvas->blendScratch(bounds);
+            static int traced = 0;
+            if (getenv("SHIORIKRKR_TRACE_EMOTE") && traced++ < 20)
+                fprintf(stderr, "E-mote canvas draw %p: drew %d bounds %d,%d,%d,%d affine %.2f %.2f %.2f %.2f %.1f %.1f\n", (void *)this, drew,
+                        bounds[0], bounds[1], bounds[2], bounds[3], affine_[0], affine_[1], affine_[2], affine_[3], affine_[4], affine_[5]);
+            ShioriEmoteDrawSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - drawStart).count();
+            return;
+        }
         tTJSNI_BaseLayer *layer = layerOf(target);
         if (!layer || !ensure() || !host()) return;
         auto *pixels = static_cast<uint8_t *>(layer->GetMainImagePixelBufferForWrite());
@@ -602,13 +679,18 @@ NCB_REGISTER_SUBCLASS(ShioriLayerMotionPlayer) {
 
 // Motion.D3DAdaptor: a canvas players draw into, copied to a layer by captureCanvas. Shiori
 // draws straight into layers, so this keeps the last layer it was given.
-class ShioriD3DAdaptor {
-public:
-    ShioriD3DAdaptor(iTJSDispatch2 *, tjs_int, tjs_int, tjs_int, tjs_int) {}
-    void setClearColor(tjs_uint32) {}
-    void captureCanvas(iTJSDispatch2 *) {}
-    void unloadUnusedTextures() {}
-};
+void ShioriD3DAdaptor::captureCanvas(iTJSDispatch2 *target) {
+    tTJSNI_BaseLayer *layer = layerOf(target);
+    if (!layer || !width_ || !height_) return;
+    if (int(layer->GetImageWidth()) != width_ || int(layer->GetImageHeight()) != height_)
+        layer->SetImageSize(width_, height_);
+    auto *out = static_cast<uint8_t *>(layer->GetMainImagePixelBufferForWrite());
+    if (!out) return;
+    const tjs_int pitch = layer->GetMainImagePixelBufferPitch();
+    for (int y = 0; y < height_; ++y) memcpy(out + size_t(y) * pitch, &pixels_[size_t(y) * width_ * 4], size_t(width_) * 4);
+    layer->Update();
+    clearCanvas();
+}
 
 NCB_REGISTER_SUBCLASS(ShioriD3DAdaptor) {
     NCB_CONSTRUCTOR((iTJSDispatch2 *, tjs_int, tjs_int, tjs_int, tjs_int));

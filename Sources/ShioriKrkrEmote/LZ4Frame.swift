@@ -72,12 +72,10 @@ enum LZ4Frame {
             }
             length += 4
             guard offset > 0, offset <= out.count else { throw Failure(description: "LZ4: bad match") }
+            // Byte by byte: appending a slice of the output to itself would copy all of it
+            // first (a copy per match; NEKOPARA Extra's models took a minute to load).
             let from = out.count - offset
-            if offset >= length {
-                out.append(contentsOf: out[from..<(from + length)])
-            } else {
-                for i in 0..<length { out.append(out[from + i]) }
-            }
+            for i in 0..<length { out.append(out[from + i]) }
         }
     }
 }
