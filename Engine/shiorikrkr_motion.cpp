@@ -2,27 +2,173 @@
  * If a copy of the MPL was not distributed with this file, You can obtain one at
  * https://mozilla.org/MPL/2.0/. */
 
-// emoteplayer.dll's script surface for ShioriKrkr: the Motion class games test and read
-// constants from (NEKOPARA's MainWindow.tjs sets drawDevice.maskMode = Motion.MaskModeAlpha
-// before any character is drawn). The constants' values are the plug-in's public interface,
-// as the games' scripts expect them. Characters themselves go through D3DEmotePlayer
-// (shiorikrkr_emote.cpp).
+// emoteplayer.dll's script surface for ShioriKrkr: the Motion class and the players games
+// draw onto plain layers with (NEKOPARA Vol. 4's AffineSourceMotion.tjs: a resource
+// manager, Motion.EmotePlayer drawing into a layer through a SeparateLayerAdaptor). Shiori's
+// own classes under the plug-in's names; the models, commands and drawing go to the host's
+// E-mote player (shiorikrkr_emote_host_t), as D3DEmotePlayer's do (shiorikrkr_emote.cpp).
+// The constants' values are the plug-in's public interface, as the games' scripts use them.
+//
+// Motion.Player (the plain motion files, .mtn) is answered as an idle player for now: it
+// draws nothing (NEKOPARA's characters are all E-mote).
 #include "tjsCommHead.h"
 #include "ncbind/ncbind.hpp"
+#include "tjsArray.h"
+#include "tjsDictionary.h"
+#include "tjsNativeLayer.h"
+#include "TVPDebug.h"
+
+#include <algorithm>
+#include <cstring>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "shiorikrkr_emote.h"
 
 #define NCB_MODULE_NAME TJS_N("emoteplayer.dll")
 
-// Motion.ResourceManager: the games' cache of motion files. Files are read when a player
-// loads them, so this only keeps the game's bookkeeping working.
+using namespace shiorikrkr::util;
+
+namespace {
+
+const shiorikrkr_emote_host_t *host() { return shiorikrkr::emoteHost(); }
+
+// A host player owned here (released with the last holder).
+struct HostPlayer {
+    void *player = nullptr;
+    explicit HostPlayer(void *p) : player(p) {}
+    ~HostPlayer() {
+        if (player && host()) host()->destroy(host()->context, player);
+    }
+};
+
+std::string hostText(void *player, const char *verb, const char *label, double index = 0) {
+    if (!player || !host()) return {};
+    char out[512] = {};
+    host()->query(host()->context, player, verb, label, &index, 1, out, sizeof(out));
+    return out;
+}
+
+double hostNumber(void *player, const char *verb, const std::string &label = {}, const double *n = nullptr, int32_t c = 0) {
+    if (!player || !host()) return 0;
+    char out[4] = {};
+    return host()->query(host()->context, player, verb, label.c_str(), n, c, out, sizeof(out));
+}
+
+void hostCommand(void *player, const char *verb, const std::string &label = {}, const double *n = nullptr, int32_t c = 0) {
+    if (player && host()) host()->command(host()->context, player, verb, label.c_str(), n, c);
+}
+
+tTJSVariant stringArray(const std::vector<std::string> &items) {
+    iTJSDispatch2 *array = TJSCreateArrayObject();
+    for (size_t i = 0; i < items.size(); ++i) {
+        tTJSVariant v(ttstr(items[i].c_str()));
+        array->PropSetByNum(TJS_MEMBERENSURE, tjs_int(i), &v, array);
+    }
+    tTJSVariant result(array, array);
+    array->Release();
+    return result;
+}
+
+void setMember(iTJSDispatch2 *dict, const char *name, const tTJSVariant &value) {
+    tTJSVariant v = value;
+    dict->PropSet(TJS_MEMBERENSURE, ttstr(name).c_str(), nullptr, &v, dict);
+}
+
+tTJSVariant dictionary(iTJSDispatch2 *&out) {
+    out = TJSCreateDictionaryObject();
+    tTJSVariant result(out, out);
+    out->Release();
+    return result;
+}
+
+tTJSNI_BaseLayer *layerOf(iTJSDispatch2 *object);
+
+} // namespace
+
+// Motion.ResourceManager: reads each model once (the host's player is the prototype the game's
+// players are copied from) and answers its metadata.
 class ShioriMotionResources {
 public:
     ShioriMotionResources(iTJSDispatch2 *, tjs_int) {}
-    tTJSVariant load(ttstr) { return tTJSVariant(); }
-    void unload(ttstr) {}
-    void unloadAll() {}
+
+    struct Resource {
+        std::shared_ptr<HostPlayer> prototype;
+        std::string chara, motion;
+        tTJSVariant info;
+        int references = 0;
+    };
+
+    tTJSVariant load(ttstr path) {
+        const std::string key = utf8(path);
+        auto found = resources_.find(key);
+        if (found != resources_.end()) {
+            found->second.references++;
+            order_.erase(std::remove(order_.begin(), order_.end(), key), order_.end());
+            order_.push_back(key);
+            return found->second.info;
+        }
+        Resource r;
+        std::vector<uint8_t> bytes;
+        std::string error;
+        if (!readStorage(path, bytes, error)) TVPThrowExceptionMessage(ttstr(error.c_str()).c_str());
+        if (host()) {
+            const uint8_t *data = bytes.data();
+            const uint64_t size = bytes.size();
+            const char *name = key.c_str();
+            char message[512] = {};
+            void *player = host()->create(host()->context, &data, &size, &name, 1, message, sizeof(message));
+            if (!player) TVPThrowExceptionMessage((ttstr("ShioriKrkr E-mote: ") + ttstr(message)).c_str());
+            r.prototype = std::make_shared<HostPlayer>(player);
+            r.chara = hostText(player, "info", "chara");
+            r.motion = hostText(player, "info", "motion");
+            TVPAddLog(ttstr("ShioriKrkr E-mote: ") + path + ttstr(" loaded"));
+        }
+        // %[metadata: %[base: %[chara, motion]]], as AffineSourceMotion reads it.
+        iTJSDispatch2 *info = nullptr, *metadata = nullptr, *base = nullptr;
+        r.info = dictionary(info);
+        tTJSVariant metadataValue = dictionary(metadata), baseValue = dictionary(base);
+        setMember(base, "chara", ttstr(r.chara.c_str()));
+        setMember(base, "motion", ttstr(r.motion.c_str()));
+        setMember(metadata, "base", baseValue);
+        setMember(info, "metadata", metadataValue);
+        r.references = 1;
+        resources_[key] = r;
+        order_.push_back(key);
+        return r.info;
+    }
+
+    void unload(ttstr path) {
+        auto found = resources_.find(utf8(path));
+        if (found != resources_.end() && --found->second.references <= 0) {
+            order_.erase(std::remove(order_.begin(), order_.end(), found->first), order_.end());
+            resources_.erase(found);
+        }
+    }
+    void unloadAll() {
+        resources_.clear();
+        order_.clear();
+    }
     void clearCache() {}
-    void setEmotePSBDecryptSeed(tjs_int) {}
+    void setEmotePSBDecryptSeed(tjs_int) {} // the host finds the seed from the files
     void setEmotePSBDecryptFunc(tTJSVariant) {}
+
+    // The newest model for a character (the one loaded last when none names it).
+    std::shared_ptr<HostPlayer> prototype(const std::string &chara) {
+        for (auto it = order_.rbegin(); it != order_.rend(); ++it) {
+            const auto &r = resources_[*it];
+            if (r.prototype && (chara.empty() || r.chara == chara)) return r.prototype;
+        }
+        for (auto it = order_.rbegin(); it != order_.rend(); ++it)
+            if (resources_[*it].prototype) return resources_[*it].prototype;
+        return nullptr;
+    }
+
+private:
+    std::map<std::string, Resource> resources_;
+    std::vector<std::string> order_;
 };
 
 NCB_REGISTER_SUBCLASS(ShioriMotionResources) {
@@ -35,60 +181,381 @@ NCB_REGISTER_SUBCLASS(ShioriMotionResources) {
     NCB_METHOD(setEmotePSBDecryptFunc);
 }
 
-// Motion.Player / Motion.EmotePlayer on plain layers: not drawn yet (NEKOPARA Vol. 0–2 draw
-// their characters through D3DEmotePlayer); they answer as idle players so scripts go on.
-class ShioriMotionPlayerStub {
+// Motion.SeparateLayerAdaptor: a player draws into this layer.
+class ShioriSeparateLayerAdaptor {
 public:
-    explicit ShioriMotionPlayerStub(ShioriMotionResources *) {}
-    void play(ttstr, tjs_int) {}
-    void progress(tjs_real) {}
-    void skip() {}
-    void skipToSync() {}
-    void pass() {}
-    void stop() {}
+    explicit ShioriSeparateLayerAdaptor(iTJSDispatch2 *layer) : layer_(layer) {
+        if (layer_) layer_->AddRef();
+    }
+    ~ShioriSeparateLayerAdaptor() {
+        if (layer_) layer_->Release();
+    }
+    void assign(iTJSDispatch2 *) {}
     void clear() {}
-    void initPhysics() {}
-    void setVariable(ttstr, tjs_real, tjs_real, tjs_real) {}
-    tjs_real getVariable(ttstr) { return 0; }
-    void setCoord(tjs_real, tjs_real, tjs_real, tjs_real) {}
-    void setScale(tjs_real, tjs_real, tjs_real) {}
-    void setRotate(tjs_real, tjs_real, tjs_real) {}
-    void setColor(tjs_int, tjs_real, tjs_real) {}
-    void playTimeline(ttstr, tjs_int) {}
-    void stopTimeline(ttstr) {}
-    bool getTimelinePlaying(ttstr) { return false; }
-    bool getAnimating() { return false; }
-    void setAnimating(bool) {}
-    bool getPlaying() { return false; }
-    void setPlaying(bool) {}
-    bool getAllplaying() { return false; }
-    void setAllplaying(bool) {}
-    ttstr getMotion() { return motion_; }
-    void setMotion(ttstr m) { motion_ = m; }
-    ttstr getChara() { return chara_; }
-    void setChara(ttstr c) { chara_ = c; }
+    bool getAbsolute() { return false; }
+    void setAbsolute(bool) {}
+    bool getIsPrimary() { return false; }
+    void setIsPrimary(bool) {}
+    tTJSVariant getParent() { return tTJSVariant(); }
+    void setParent(tTJSVariant) {}
+    iTJSDispatch2 *layer() const { return layer_; }
 
 private:
-    ttstr motion_, chara_;
+    iTJSDispatch2 *layer_ = nullptr;
 };
 
-class ShioriEmotePlayerStub : public ShioriMotionPlayerStub {
+NCB_REGISTER_SUBCLASS(ShioriSeparateLayerAdaptor) {
+    NCB_CONSTRUCTOR((iTJSDispatch2 *));
+    NCB_METHOD(assign);
+    NCB_METHOD(clear);
+    NCB_PROPERTY(absolute, getAbsolute, setAbsolute);
+    NCB_PROPERTY(isPrimary, getIsPrimary, setIsPrimary);
+    NCB_PROPERTY(parent, getParent, setParent);
+}
+
+namespace {
+tTJSNI_BaseLayer *layerOf(iTJSDispatch2 *object) {
+    if (!object) return nullptr;
+    if (auto *adaptor = ncbInstanceAdaptor<ShioriSeparateLayerAdaptor>::GetNativeInstance(object))
+        object = adaptor->layer();
+    tTJSNI_BaseLayer *layer = nullptr;
+    if (!object || TJS_FAILED(object->NativeInstanceSupport(TJS_NIS_GETINSTANCE, tTJSNC_Layer::ClassID,
+                                                             (iTJSNativeInstance **)&layer)))
+        return nullptr;
+    return layer;
+}
+} // namespace
+
+// Motion.EmotePlayer: an E-mote character drawn into a layer.
+class ShioriLayerEmotePlayer {
 public:
-    explicit ShioriEmotePlayerStub(ShioriMotionResources *r) : ShioriMotionPlayerStub(r) {}
+    explicit ShioriLayerEmotePlayer(ShioriMotionResources *resources) : resources_(resources) {}
+
+    void play(ttstr motion, tjs_int) {
+        motion_ = utf8(motion);
+        ensure();
+    }
+    void initPhysics(tTJSVariant) {}
+
+    tTJSVariant serialize() {
+        // A token the next unserialize copies the state from (the game copies a layer).
+        return tTJSVariant(tjs_int64(reinterpret_cast<intptr_t>(this)));
+    }
+    void unserialize(tTJSVariant token) {
+        auto *other = reinterpret_cast<ShioriLayerEmotePlayer *>(intptr_t(token.AsInteger()));
+        if (!other || !other->player_ || !host() || !host()->clone) return;
+        player_ = std::make_shared<HostPlayer>(host()->clone(host()->context, other->player_->player));
+        chara_ = other->chara_;
+        motion_ = other->motion_;
+    }
+
+    // clear(layer, colour): the layer filled with the colour (its neutral, transparent).
+    void clear(iTJSDispatch2 *target, tjs_uint32 color) {
+        tTJSNI_BaseLayer *layer = layerOf(target);
+        if (!layer) return;
+        auto *pixels = static_cast<uint8_t *>(layer->GetMainImagePixelBufferForWrite());
+        if (!pixels) return;
+        const tjs_int pitch = layer->GetMainImagePixelBufferPitch();
+        const tjs_uint w = layer->GetImageWidth(), h = layer->GetImageHeight();
+        for (tjs_uint y = 0; y < h; ++y) {
+            auto *row = reinterpret_cast<uint32_t *>(pixels + y * pitch);
+            std::fill(row, row + w, color);
+        }
+    }
+
+    // progress(milliseconds)
+    void progress(tjs_real ms) {
+        if (!ensure()) return;
+        const double controls[4] = {meshDivision_, bust_, hair_, parts_};
+        hostCommand(player(), "controls", "", controls, 4);
+        const double frames = ms * 60.0 / 1000.0;
+        hostCommand(player(), "progress", "", &frames, 1);
+    }
+
+    // draw(layer or adaptor): the character into the layer's image, through the affine the
+    // game set (setDrawAffineTranslateMatrix).
+    void draw(iTJSDispatch2 *target) {
+        tTJSNI_BaseLayer *layer = layerOf(target);
+        if (!layer || !ensure() || !host()) return;
+        auto *pixels = static_cast<uint8_t *>(layer->GetMainImagePixelBufferForWrite());
+        if (!pixels) return;
+        const tjs_int pitch = layer->GetMainImagePixelBufferPitch();
+        const int w = int(layer->GetImageWidth()), h = int(layer->GetImageHeight());
+        hostCommand(player(), "show");
+        int32_t bounds[4] = {0, 0, 0, 0};
+        if (host()->draw(host()->context, player(), pixels, w, h, pitch, affine_, bounds)) {
+            // The host draws R, G, B, A; layers hold B, G, R, A.
+            for (int y = std::max(0, bounds[1]); y < std::min(h, bounds[3]); ++y) {
+                uint8_t *p = pixels + size_t(y) * pitch;
+                for (int x = std::max(0, bounds[0]); x < std::min(w, bounds[2]); ++x) std::swap(p[x * 4], p[x * 4 + 2]);
+            }
+        }
+        layer->Update();
+    }
+
+    static tjs_error setCoord(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+        const double v[4] = {number(p, n, 0), number(p, n, 1), number(p, n, 2) * 60 / 1000, number(p, n, 3)};
+        self->command("coord", "", v, 4);
+        return TJS_S_OK;
+    }
+    static tjs_error setRotate(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+        const double v[3] = {number(p, n, 0), number(p, n, 1) * 60 / 1000, number(p, n, 2)};
+        self->command("rot", "", v, 3);
+        return TJS_S_OK;
+    }
+    static tjs_error setScale(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+        const double v[3] = {number(p, n, 0, 1), number(p, n, 1) * 60 / 1000, number(p, n, 2)};
+        self->command("scale", "", v, 3);
+        return TJS_S_OK;
+    }
+    static tjs_error setColor(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+        // 0xAARRGGBB here; the host takes 0xRRGGBBAA.
+        const tjs_uint32 argb = tjs_uint32(tjs_int64(number(p, n, 0, 0xFFFFFFFF)));
+        const double v[3] = {double((argb << 8) | (argb >> 24)), number(p, n, 1) * 60 / 1000, number(p, n, 2)};
+        self->command("color", "", v, 3);
+        return TJS_S_OK;
+    }
+    static tjs_error setVariable(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+        const double v[3] = {number(p, n, 1), number(p, n, 2) * 60 / 1000, number(p, n, 3)};
+        self->command("variable", text(p, n, 0), v, 3);
+        return TJS_S_OK;
+    }
+    static tjs_error getVariable(tTJSVariant *r, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+        if (r) *r = self->ensure() ? hostNumber(self->player(), "variable", text(p, n, 0)) : 0.0;
+        return TJS_S_OK;
+    }
+    void setOuterForce(tTJSVariant, tjs_real, tjs_real) {}
+    // (a, c, b, d, tx, ty): x' = a x + b y + tx, y' = c x + d y + ty.
+    void setDrawAffineTranslateMatrix(tjs_real a, tjs_real c, tjs_real b, tjs_real d, tjs_real tx, tjs_real ty) {
+        affine_[0] = a;
+        affine_[1] = c;
+        affine_[2] = b;
+        affine_[3] = d;
+        affine_[4] = tx;
+        affine_[5] = ty;
+    }
+    void setCameraOffset(tjs_real, tjs_real) {}
+    static tjs_error startWind(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+        const double v[5] = {number(p, n, 0), number(p, n, 1), number(p, n, 2), number(p, n, 3), number(p, n, 4)};
+        self->command("wind", "", v, 5);
+        return TJS_S_OK;
+    }
+    void stopWind() { command("windstop"); }
+    static tjs_error contains(tTJSVariant *r, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+        std::string label;
+        int first = 0;
+        if (n >= 3) {
+            label = text(p, n, 0);
+            first = 1;
+        }
+        const double v[2] = {number(p, n, first), number(p, n, first + 1)};
+        if (r) *r = self->ensure() && hostNumber(self->player(), "contains", label, v, 2) != 0;
+        return TJS_S_OK;
+    }
+    void skip() { command("skip"); }
+    void skipToSync() { command("skip"); }
+    void pass() { command("pass"); }
+    void stop() { command("stop"); }
+    static tjs_error playTimeline(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+        const double v[1] = {number(p, n, 1)};
+        self->command("play", text(p, n, 0), v, 1);
+        return TJS_S_OK;
+    }
+    static tjs_error stopTimeline(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+        self->command("stop", text(p, n, 0));
+        return TJS_S_OK;
+    }
+    bool getTimelinePlaying(ttstr label) { return ensure() && hostNumber(player(), "playing", utf8(label)) != 0; }
+    bool getLoopTimeline(ttstr label) { return ensure() && hostNumber(player(), "loop", utf8(label)) != 0; }
+    tjs_real getTimelineTotalFrameCount(ttstr label) { return ensure() ? hostNumber(player(), "length", utf8(label)) : 0; }
+    tTJSVariant getMainTimelineLabelList() { return stringArray(labels("main")); }
+    tTJSVariant getDiffTimelineLabelList() { return stringArray(labels("diff")); }
+    static tjs_error setTimelineBlendRatio(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+        const double v[4] = {number(p, n, 1, 1), number(p, n, 2) * 60 / 1000, number(p, n, 3), number(p, n, 4)};
+        self->command("blend", text(p, n, 0), v, 4);
+        return TJS_S_OK;
+    }
+    static tjs_error fadeInTimeline(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+        const double play[1] = {number(p, n, 3)};
+        self->command("play", text(p, n, 0), play, 1);
+        const double zero[4] = {0, 0, 0, 0};
+        self->command("blend", text(p, n, 0), zero, 4);
+        const double v[4] = {1, number(p, n, 1) * 60 / 1000, number(p, n, 2), 0};
+        self->command("blend", text(p, n, 0), v, 4);
+        return TJS_S_OK;
+    }
+    static tjs_error fadeOutTimeline(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+        const double v[2] = {number(p, n, 1) * 60 / 1000, number(p, n, 2)};
+        self->command("fadeout", text(p, n, 0), v, 2);
+        return TJS_S_OK;
+    }
+    // [%[label, flags, blendRatio], …]
+    tTJSVariant getPlayingTimelineInfoList() {
+        iTJSDispatch2 *array = TJSCreateArrayObject();
+        const auto playing = labels("playing");
+        for (size_t i = 0; i < playing.size(); ++i) {
+            iTJSDispatch2 *info = nullptr;
+            tTJSVariant value = dictionary(info);
+            setMember(info, "label", ttstr(playing[i].c_str()));
+            const double index = double(i);
+            setMember(info, "flags", tjs_int(hostNumber(player(), "flags", "", &index, 1)));
+            setMember(info, "blendRatio", hostNumber(player(), "blend", playing[i]));
+            array->PropSetByNum(TJS_MEMBERENSURE, tjs_int(i), &value, array);
+        }
+        tTJSVariant result(array, array);
+        array->Release();
+        return result;
+    }
+    tTJSVariant getVariableFrameList(ttstr) { return stringArray({}); }
+
+    bool getAnimating() { return ensure() && hostNumber(player(), "animating") != 0; }
+    void setAnimating(bool) {}
+    bool getPlaying() { return getAnimating(); }
+    void setPlaying(bool) {}
+    bool getAllplaying() { return getAnimating(); }
+    void setAllplaying(bool) {}
+    tjs_real getLoopTime() { return -1; }
+    void setLoopTime(tjs_real) {}
+    tjs_real getTickCount() { return 0; }
+    void setTickCount(tjs_real) {}
+    tjs_real getSpeed() { return 1; }
+    void setSpeed(tjs_real) {}
+    tTJSVariant getOutline() { return tTJSVariant(); }
+    void setOutline(tTJSVariant) {}
+    ttstr getMotion() { return ttstr(motion_.c_str()); }
+    void setMotion(ttstr m) { motion_ = utf8(m); }
+    ttstr getChara() { return ttstr(chara_.c_str()); }
+    void setChara(ttstr c) {
+        if (utf8(c) != chara_) player_.reset();
+        chara_ = utf8(c);
+    }
+    tTJSVariant getVariableKeys() {
+        std::vector<std::string> names;
+        if (ensure())
+            for (int i = 0, n = int(hostNumber(player(), "count", "variables")); i < n; ++i)
+                names.push_back(hostText(player(), "label", "variables", i));
+        return stringArray(names);
+    }
+    tjs_int getMaskMode() { return maskMode_; }
+    void setMaskMode(tjs_int v) { maskMode_ = v; }
+    tjs_int getCompletionType() { return completionType_; }
+    void setCompletionType(tjs_int v) { completionType_ = v; }
+    tjs_real getMeshDivisionRatio() { return meshDivision_; }
+    void setMeshDivisionRatio(tjs_real v) { meshDivision_ = v; }
+    tjs_real getBustScale() { return bust_; }
+    void setBustScale(tjs_real v) { bust_ = v; }
+    tjs_real getHairScale() { return hair_; }
+    void setHairScale(tjs_real v) { hair_ = v; }
+    tjs_real getPartsScale() { return parts_; }
+    void setPartsScale(tjs_real v) { parts_ = v; }
+    tjs_real getColorWeight() { return colorWeight_; }
+    void setColorWeight(tjs_real v) { colorWeight_ = v; }
+
+private:
+    void *player() const { return player_ ? player_->player : nullptr; }
+
+    bool ensure() {
+        if (player_) return true;
+        if (!resources_ || !host() || !host()->clone) return false;
+        auto prototype = resources_->prototype(chara_);
+        if (!prototype) return false;
+        player_ = std::make_shared<HostPlayer>(host()->clone(host()->context, prototype->player));
+        return player_->player != nullptr;
+    }
+
+    void command(const char *verb, const std::string &label = {}, const double *n = nullptr, int32_t c = 0) {
+        if (ensure()) hostCommand(player(), verb, label, n, c);
+    }
+
+    std::vector<std::string> labels(const char *list) {
+        std::vector<std::string> out;
+        if (!ensure()) return out;
+        for (int i = 0, n = int(hostNumber(player(), "count", list)); i < n; ++i) out.push_back(hostText(player(), "label", list, i));
+        return out;
+    }
+
+    ShioriMotionResources *resources_ = nullptr;
+    std::shared_ptr<HostPlayer> player_;
+    std::string chara_, motion_;
+    double affine_[6] = {1, 0, 0, 1, 0, 0};
+    tjs_int maskMode_ = 1, completionType_ = 0;
+    tjs_real meshDivision_ = 1, bust_ = 1, hair_ = 1, parts_ = 1, colorWeight_ = 1;
 };
 
-#define SHIORI_MOTION_STUB_METHODS \
+#define SHIORI_LAYER_EMOTE_METHODS \
     NCB_CONSTRUCTOR((ShioriMotionResources *)); \
-    NCB_METHOD(play); NCB_METHOD(progress); NCB_METHOD(skip); NCB_METHOD(skipToSync); NCB_METHOD(pass); \
-    NCB_METHOD(stop); NCB_METHOD(clear); NCB_METHOD(initPhysics); NCB_METHOD(setVariable); NCB_METHOD(getVariable); \
-    NCB_METHOD(setCoord); NCB_METHOD(setScale); NCB_METHOD(setRotate); NCB_METHOD(setColor); \
-    NCB_METHOD(playTimeline); NCB_METHOD(stopTimeline); NCB_METHOD(getTimelinePlaying); \
+    NCB_METHOD(play); NCB_METHOD(initPhysics); NCB_METHOD(serialize); NCB_METHOD(unserialize); \
+    NCB_METHOD(clear); NCB_METHOD(progress); NCB_METHOD(draw); \
+    RawCallback("setCoord", &Class::setCoord, 0); RawCallback("setRotate", &Class::setRotate, 0); \
+    RawCallback("setScale", &Class::setScale, 0); RawCallback("setColor", &Class::setColor, 0); \
+    RawCallback("setVariable", &Class::setVariable, 0); RawCallback("getVariable", &Class::getVariable, 0); \
+    NCB_METHOD(setOuterForce); NCB_METHOD(setDrawAffineTranslateMatrix); NCB_METHOD(setCameraOffset); \
+    RawCallback("startWind", &Class::startWind, 0); NCB_METHOD(stopWind); \
+    RawCallback("contains", &Class::contains, 0); RawCallback("hitTest", &Class::contains, 0); \
+    NCB_METHOD(skip); NCB_METHOD(skipToSync); NCB_METHOD(pass); NCB_METHOD(stop); \
+    RawCallback("playTimeline", &Class::playTimeline, 0); RawCallback("stopTimeline", &Class::stopTimeline, 0); \
+    NCB_METHOD(getTimelinePlaying); NCB_METHOD(getLoopTimeline); NCB_METHOD(getTimelineTotalFrameCount); \
+    NCB_METHOD(getMainTimelineLabelList); NCB_METHOD(getDiffTimelineLabelList); \
+    RawCallback("setTimelineBlendRatio", &Class::setTimelineBlendRatio, 0); \
+    RawCallback("fadeInTimeline", &Class::fadeInTimeline, 0); RawCallback("fadeOutTimeline", &Class::fadeOutTimeline, 0); \
+    NCB_METHOD(getPlayingTimelineInfoList); NCB_METHOD(getVariableFrameList); \
     NCB_PROPERTY(animating, getAnimating, setAnimating); NCB_PROPERTY(playing, getPlaying, setPlaying); \
-    NCB_PROPERTY(allplaying, getAllplaying, setAllplaying); NCB_PROPERTY(motion, getMotion, setMotion); \
-    NCB_PROPERTY(chara, getChara, setChara)
+    NCB_PROPERTY(allplaying, getAllplaying, setAllplaying); NCB_PROPERTY(loopTime, getLoopTime, setLoopTime); \
+    NCB_PROPERTY(tickCount, getTickCount, setTickCount); NCB_PROPERTY(speed, getSpeed, setSpeed); \
+    NCB_PROPERTY(outline, getOutline, setOutline); NCB_PROPERTY(motion, getMotion, setMotion); \
+    NCB_PROPERTY(chara, getChara, setChara); NCB_PROPERTY_RO(variableKeys, getVariableKeys); \
+    NCB_PROPERTY(maskMode, getMaskMode, setMaskMode); NCB_PROPERTY(completionType, getCompletionType, setCompletionType); \
+    NCB_PROPERTY(meshDivisionRatio, getMeshDivisionRatio, setMeshDivisionRatio); \
+    NCB_PROPERTY(bustScale, getBustScale, setBustScale); NCB_PROPERTY(hairScale, getHairScale, setHairScale); \
+    NCB_PROPERTY(partsScale, getPartsScale, setPartsScale); NCB_PROPERTY(colorWeight, getColorWeight, setColorWeight)
 
-NCB_REGISTER_SUBCLASS(ShioriMotionPlayerStub) { SHIORI_MOTION_STUB_METHODS; }
-NCB_REGISTER_SUBCLASS(ShioriEmotePlayerStub) { SHIORI_MOTION_STUB_METHODS; }
+NCB_REGISTER_SUBCLASS(ShioriLayerEmotePlayer) { SHIORI_LAYER_EMOTE_METHODS; }
+
+// Motion.Player: plain motions (.mtn). Idle for now; scripts go on.
+class ShioriLayerMotionPlayer : public ShioriLayerEmotePlayer {
+public:
+    explicit ShioriLayerMotionPlayer(ShioriMotionResources *) : ShioriLayerEmotePlayer(nullptr) {}
+    tTJSVariant getOnAction() { return onAction_; }
+    void setOnAction(tTJSVariant v) { onAction_ = v; }
+    tTJSVariant getTags() { return stringArray({}); }
+    void setTags(tTJSVariant) {}
+    tTJSVariant getCommandList() { return stringArray({}); }
+    void setFlip(tjs_real, tjs_real, tjs_real) {}
+    void setSlant(tjs_real, tjs_real, tjs_real) {}
+    void setZoom(tjs_real, tjs_real, tjs_real) {}
+    static bool getUseD3D() { return false; }
+
+private:
+    tTJSVariant onAction_;
+};
+
+NCB_REGISTER_SUBCLASS(ShioriLayerMotionPlayer) {
+    SHIORI_LAYER_EMOTE_METHODS;
+    NCB_PROPERTY(onAction, getOnAction, setOnAction);
+    NCB_PROPERTY(tags, getTags, setTags);
+    NCB_METHOD(getCommandList);
+    NCB_METHOD(setFlip);
+    NCB_METHOD(setSlant);
+    NCB_METHOD(setZoom);
+    NCB_PROPERTY_RO(useD3D, getUseD3D);
+}
+
+// Motion.D3DAdaptor: a canvas players draw into, copied to a layer by captureCanvas. Shiori
+// draws straight into layers, so this keeps the last layer it was given.
+class ShioriD3DAdaptor {
+public:
+    ShioriD3DAdaptor(iTJSDispatch2 *, tjs_int, tjs_int, tjs_int, tjs_int) {}
+    void setClearColor(tjs_uint32) {}
+    void captureCanvas(iTJSDispatch2 *) {}
+    void unloadUnusedTextures() {}
+};
+
+NCB_REGISTER_SUBCLASS(ShioriD3DAdaptor) {
+    NCB_CONSTRUCTOR((iTJSDispatch2 *, tjs_int, tjs_int, tjs_int, tjs_int));
+    NCB_METHOD(setClearColor);
+    NCB_METHOD(captureCanvas);
+    NCB_METHOD(unloadUnusedTextures);
+}
 
 struct ShioriMotion {
     static bool getD3DAvailable() { return true; }
@@ -102,8 +569,10 @@ NCB_REGISTER_CLASS_DIFFER(Motion, ShioriMotion) {
     NCB_METHOD(getD3DAvailable);
     NCB_PROPERTY(enableD3D, getEnableD3D, setEnableD3D);
     NCB_SUBCLASS(ResourceManager, ShioriMotionResources);
-    NCB_SUBCLASS(Player, ShioriMotionPlayerStub);
-    NCB_SUBCLASS(EmotePlayer, ShioriEmotePlayerStub);
+    NCB_SUBCLASS(Player, ShioriLayerMotionPlayer);
+    NCB_SUBCLASS(EmotePlayer, ShioriLayerEmotePlayer);
+    NCB_SUBCLASS(SeparateLayerAdaptor, ShioriSeparateLayerAdaptor);
+    NCB_SUBCLASS(D3DAdaptor, ShioriD3DAdaptor);
     Variant("MaskModeStencil", (tjs_int)0);
     Variant("MaskModeAlpha", (tjs_int)1);
     Variant("PlayFlagForce", (tjs_int)1);

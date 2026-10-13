@@ -113,7 +113,8 @@ public final class KrkrEmoteHost {
                 metadata.append(hit.metadata)
                 continue
             }
-            let psb = try PSBFile(psz: file.bytes, bodySeed: seed)
+            let bytes = LZ4Frame.isFrame(file.bytes) ? try LZ4Frame.decode(file.bytes) : file.bytes
+            let psb = try PSBFile(psz: bytes, bodySeed: seed)
             if psb.seed != 0 { seed = psb.seed }
             let model = try EmoteModel(psb: psb)
             let meta = psb.root["metadata"] ?? .null
@@ -166,13 +167,20 @@ public final class KrkrEmoteHost {
             switch label {
             case "main": return (Double(p.mainTimelines.count), nil)
             case "diff": return (Double(p.differenceTimelines.count), nil)
+            case "variables": return (Double(p.variableNames.count), nil)
             default: return (Double(p.playingLabels.count), nil)
             }
         case "label":
-            let list = label == "main" ? p.mainTimelines : label == "diff" ? p.differenceTimelines : p.playingLabels
+            let list = label == "main" ? p.mainTimelines : label == "diff" ? p.differenceTimelines
+                : label == "variables" ? p.variableNames : p.playingLabels
             let i = Int(n.first ?? 0)
             return (0, i >= 0 && i < list.count ? list[i] : "")
         case "flags": return (Double(p.playingFlags(Int(n.first ?? 0))), nil)
+        case "info":
+            let model = p.models.first
+            return (0, label == "chara" ? model?.baseObject ?? "" : model?.baseMotion ?? "")
+        case "loop": return (p.loops(label) ? 1 : 0, nil)
+        case "length": return (p.length(label), nil)
         default: return (0, nil)
         }
     }

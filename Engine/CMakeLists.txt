@@ -57,7 +57,8 @@ list(APPEND SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/getlangname.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_emote.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_motion.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_motionplayer.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_motionplayer.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/datapack.cpp")
 
 option(SHIORIKRKR_DEBUG_THROW "Backtrace every C++ throw (SHIORIKRKR_TRACE_THROW=1)" OFF)
 if(SHIORIKRKR_DEBUG_THROW)

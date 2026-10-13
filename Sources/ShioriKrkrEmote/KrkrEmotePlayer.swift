@@ -132,6 +132,24 @@ public final class KrkrEmotePlayer {
         return out
     }
 
+    public var variableNames: [String] {
+        var out: [String] = []
+        for model in models { for n in model.variableNames where !out.contains(n) { out.append(n) } }
+        return out
+    }
+
+    /// Whether a timeline loops (has loop points).
+    public func loops(_ label: String) -> Bool {
+        guard let t = timeline(label) else { return false }
+        return t.loopEnd > t.loopBegin && t.loopBegin >= 0
+    }
+
+    /// A timeline's length in frames (its last key).
+    public func length(_ label: String) -> Double {
+        guard let t = timeline(label) else { return 0 }
+        return t.tracks.values.compactMap { $0.last?.time }.max() ?? 0
+    }
+
     private func timeline(_ label: String) -> EmoteModel.Timeline? {
         for model in models { if let t = model.timelines[label] { return t } }
         return nil

@@ -1,0 +1,37 @@
+diff --git a/plugins/textrender.cpp b/plugins/textrender.cpp
+index 21ee7c3..efe4d08 100644
+--- a/plugins/textrender.cpp
++++ b/plugins/textrender.cpp
+@@ -1342,10 +1342,32 @@ int TextRenderBase::calcShowCount()
+     return m_characters.size();
+ }
+ 
++// Shiori: textrender.dll 2.x's link regions (in-text cross references; JAPANESE SCHOOL LIFE's
++// tips ask for them). The link markup isn't known, so no text produces links: an empty list
++// and no rectangles (the user's design from Shiori's AetherKrkr patch 0016).
++static tjs_error ShioriGetLinkNames(tTJSVariant* result, tjs_int, tTJSVariant**, TextRenderBase*)
++{
++    if (result)
++    {
++        iTJSDispatch2* array = TJSCreateArrayObject();
++        *result = tTJSVariant(array, array);
++        array->Release();
++    }
++    return TJS_S_OK;
++}
++static tjs_error ShioriGetLinkRects(tTJSVariant* result, tjs_int, tTJSVariant**, TextRenderBase*)
++{
++    if (result)
++        result->Clear();
++    return TJS_S_OK;
++}
++
+ // register the class
+ NCB_REGISTER_CLASS(TextRenderBase)
+ {
+     Constructor();
++    RawCallback("getLinkNames", &ShioriGetLinkNames, 0);
++    RawCallback("getLinkRects", &ShioriGetLinkRects, 0);
+ 
+     NCB_METHOD(render);
+     NCB_METHOD(setRenderSize);

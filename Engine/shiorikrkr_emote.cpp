@@ -45,7 +45,7 @@ const shiorikrkr_emote_host_t *emoteHost() { return g_hasHost ? &g_host : nullpt
 
 } // namespace shiorikrkr
 
-namespace {
+namespace shiorikrkr::util {
 
 std::string utf8(const ttstr &s) { return s.AsStdString(); }
 
@@ -83,7 +83,7 @@ bool readStorage(const ttstr &name, std::vector<uint8_t> &out, std::string &erro
     return true;
 }
 
-double number(tTJSVariant **param, tjs_int count, tjs_int index, double fallback = 0) {
+double number(tTJSVariant **param, tjs_int count, tjs_int index, double fallback) {
     if (index >= count || !param[index] || param[index]->Type() == tvtVoid) return fallback;
     return param[index]->AsReal();
 }
@@ -93,7 +93,8 @@ std::string text(tTJSVariant **param, tjs_int count, tjs_int index) {
     return utf8(ttstr(*param[index]));
 }
 
-} // namespace
+} // namespace shiorikrkr::util
+using namespace shiorikrkr::util;
 
 // One character on a D3D layer.
 class ShioriEmotePlayer {
