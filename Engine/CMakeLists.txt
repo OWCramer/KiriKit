@@ -48,7 +48,9 @@ list(APPEND SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/cx_decrypt.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_presenter.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/cursor_decode.mm"
-    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_movie.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/shiorikrkr_movie.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/nekoworks.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/getlangname.cpp")
 
 option(SHIORIKRKR_DEBUG_THROW "Backtrace every C++ throw (SHIORIKRKR_TRACE_THROW=1)" OFF)
 if(SHIORIKRKR_DEBUG_THROW)

@@ -30,6 +30,7 @@
 #include "XP3Archive.h"
 
 #include "cx_decrypt.h"
+#include "nekoworks.h"
 #include "shiorikrkr_presenter.h"
 #include "cursor_decode.h"
 #include "shiorikrkr_movie.h"
@@ -61,6 +62,7 @@ struct Host {
     std::vector<std::string> argumentStorage;
     std::vector<char *> argv;
     std::unique_ptr<shiorikrkr::CxDecryptor> cx;
+    shiorikrkr::NekoWorksKey neko;
     bool viewTaken = false;
     shiorikrkr_message_fn message = nullptr;
     void *messageContext = nullptr;
@@ -98,8 +100,14 @@ void hostLog(const std::string &line) {
 // krkrsdl3's XP3 extraction filter: called for every block read from an archive member,
 // with the member's adlr hash and the block's offset in the member.
 void cxFilter(tTVPXP3ExtractionFilterInfo *info, tTJSVariant *) {
+    if (!info || !info->Buffer || info->BufferSize == 0) return;
+    if (host().neko.valid) {
+        shiorikrkr::decodeNekoWorks(host().neko, info->FileHash, info->Offset, static_cast<uint8_t *>(info->Buffer),
+                                    info->BufferSize);
+        return;
+    }
     const auto &cx = host().cx;
-    if (!cx || !info || !info->Buffer || info->BufferSize == 0) return;
+    if (!cx) return;
     static const bool trace = getenv("SHIORIKRKR_TRACE_CX") != nullptr;
     if (trace) {
         const uint8_t *b = static_cast<const uint8_t *>(info->Buffer);
@@ -246,6 +254,17 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
         // read as they are, as GARbro does.
         TVPXP3FilterOnlyFlaggedMembers = true;
         hostLog("ShioriKrkr: CxDec scheme loaded");
+    }
+
+    // NEKO WORKs archives (NEKOPARA): their key comes from their own PNG and Ogg entries.
+    h.neko = {};
+    if (!h.cx) {
+        std::string line;
+        if (shiorikrkr::detectNekoWorksKey(config->game_root, h.neko, line)) {
+            TVPSetXP3ArchiveExtractionFilter(cxFilter);
+            TVPXP3FilterOnlyFlaggedMembers = true;
+        }
+        if (!line.empty()) hostLog("ShioriKrkr: " + line);
     }
 
     // argv as krkrsdl3 expects it: the executable (its folder is System.exePath), the game
@@ -529,6 +548,7 @@ SHIORIKRKR_EXPORT void shiorikrkr_stop(void) {
     TVPSetXP3ArchiveExtractionFilter(nullptr);
     TVPSetOnLog(nullptr);
     h.cx.reset();
+    h.neko = {};
     h.started = false;
     h.finished = true;
 }

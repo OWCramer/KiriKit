@@ -36,5 +36,5 @@ if [ -n "$TITLE" ]; then
 fi
 PATCH=()
 [ -d "$GAME/patch" ] && PATCH=(--patch "$GAME/patch")
-exec "$ROOT/build/shiorikrkr/macos/shiorikrkr-harness" --base "$GAME/base" "${PATCH[@]}" --work "$WORK" \
-    "${SCHEME[@]}" --font "$ROOT/App/Resources/SiglusFonts/BIZUDGothic-Regular.ttf" "${ARGS[@]}"
+exec "$ROOT/build/shiorikrkr/macos/shiorikrkr-harness" --base "$GAME/base" ${PATCH[@]+"${PATCH[@]}"} --work "$WORK" \
+    ${SCHEME[@]+"${SCHEME[@]}"} --font "$ROOT/App/Resources/SiglusFonts/BIZUDGothic-Regular.ttf" ${ARGS[@]+"${ARGS[@]}"}

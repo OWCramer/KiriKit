@@ -24,7 +24,8 @@ struct PresentedFrame {
 
 class PresenterBackend : public krkrsdl3::SWRenderBackend {
 public:
-    const char *GetName() const override { return "shiori"; }
+    // "software": krkrsdl3 code (DrawDeviceD3D) picks its CPU paths by this name.
+    const char *GetName() const override { return "software"; }
 
     void BeginFrame(int winWidth, int winHeight) override;
     void EndFrame() override;
