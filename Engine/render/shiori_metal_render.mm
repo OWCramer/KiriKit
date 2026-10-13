@@ -1447,7 +1447,7 @@ bool encodeInto(iTVPTexture2D *texture, const std::function<bool(void *, size_t,
 bool presentFrame(iTVPTexture2D *texture, int width, int height, bool changed, PresentedFrame &out) {
     Texture *t = ours(texture);
     if (!t || width <= 0 || height <= 0) return false;
-    static id<MTLTexture> ring[3];
+    static id<MTLTexture> ring[4]; // the presenter shows them on a queue of its own, a frame or two behind
     static int next = 0;
     static PresentedFrame last;
     Device &g = gpu();
@@ -1460,9 +1460,9 @@ bool presentFrame(iTVPTexture2D *texture, int width, int height, bool changed, P
         changed = true;
     }
     if (changed || !last.texture) {
-        // Three in turn: the host is done with one by the time it comes round again.
+        // Four in turn: the presenter is done with one by the time it comes round again.
         id<MTLTexture> into = ring[next];
-        next = (next + 1) % 3;
+        next = (next + 1) % 4;
         uint64_t serial = 0;
         uint64_t value = g.commitFrame(t->Buffer(), size_t(t->GetPitch()), width, height, into, serial);
         t->MarkUsed(serial);
