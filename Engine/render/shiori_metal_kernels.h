@@ -36,6 +36,12 @@ struct KernelParams {
     unsigned ruleOffset, rulePitch; // the rule image (8-bit)
     unsigned opa, color;
     int src1lv, src2lv;
+    // A sampled source (stretches and warps; 0 reads src as it lies): 1 warp, nearest; 2 warp,
+    // bilinear; 3 stretch, nearest; 4 stretch, bilinear. The source is the srcWidth x srcHeight
+    // view at srcOffset; outside it pixels are 0.
+    unsigned sample;
+    int srcWidth, srcHeight;
+    float matrix[9]; // warps: target pixel -> source (homogeneous); stretches: scale x, y
 };
 
 static const char *kKernelSource = R"MSL(
@@ -51,6 +57,9 @@ struct KernelParams {
     uint ruleOffset, rulePitch;
     uint opa, color;
     int src1lv, src2lv;
+    uint sample;
+    int srcWidth, srcHeight;
+    float matrix[9];
 };
 
 // Saturating per-byte add of two packed pixels.
@@ -113,6 +122,52 @@ static inline uint alphaOnAlpha(uint d, uint s, uint addr, device const uchar *o
     return mixColour(d, s, ooo[addr]) + (uint(negmul[addr]) << 24);
 }
 
+// A source pixel of the sampled view (0 outside it).
+static inline uint fetch(device const uint *src, constant KernelParams &p, int x, int y) {
+    if (x < 0 || y < 0 || x >= p.srcWidth || y >= p.srcHeight) return 0;
+    return src[p.srcOffset + uint(y) * p.srcPitch + uint(x)];
+}
+
+// Bilinear, each byte rounded half up (as the CPU's resampler does).
+static inline uint bilinear(device const uint *src, constant KernelParams &p, float x, float y) {
+    int x0 = int(floor(x)), y0 = int(floor(y));
+    float fx = x - float(x0), fy = y - float(y0);
+    uint a = fetch(src, p, x0, y0), b = fetch(src, p, x0 + 1, y0);
+    uint c = fetch(src, p, x0, y0 + 1), d = fetch(src, p, x0 + 1, y0 + 1);
+    uint r = 0;
+    for (uint shift = 0; shift < 32; shift += 8) {
+        float top = float((a >> shift) & 0xffu) * (1 - fx) + float((b >> shift) & 0xffu) * fx;
+        float bottom = float((c >> shift) & 0xffu) * (1 - fx) + float((d >> shift) & 0xffu) * fx;
+        float v = clamp(floor(top * (1 - fy) + bottom * fy + 0.5f), 0.0f, 255.0f);
+        r |= uint(v) << shift;
+    }
+    return r;
+}
+
+// The sampled source pixel for target pixel (x, y) of the operation's rectangle.
+static inline uint sampled(device const uint *src, constant KernelParams &p, uint2 gid) {
+    float x = float(gid.x), y = float(gid.y);
+    if (p.sample <= 2) {
+        // Warp: inverse map, nothing beyond a pixel outside the view.
+        float w = p.matrix[6] * x + p.matrix[7] * y + p.matrix[8];
+        if (fabs(w) < 1e-12f) return 0;
+        float sx = (p.matrix[0] * x + p.matrix[1] * y + p.matrix[2]) / w;
+        float sy = (p.matrix[3] * x + p.matrix[4] * y + p.matrix[5]) / w;
+        if (sx < -1 || sy < -1 || sx > float(p.srcWidth) || sy > float(p.srcHeight)) return 0;
+        if (p.sample == 1) return fetch(src, p, int(floor(sx + 0.5f)), int(floor(sy + 0.5f)));
+        return bilinear(src, p, sx, sy);
+    }
+    // Stretch: each target pixel's place in the view, kept inside it.
+    if (p.sample == 3) {
+        float sx = clamp(floor(x * p.matrix[0]), 0.0f, float(p.srcWidth - 1));
+        float sy = clamp(floor(y * p.matrix[1]), 0.0f, float(p.srcHeight - 1));
+        return fetch(src, p, int(sx), int(sy));
+    }
+    float sx = clamp((x + 0.5f) * p.matrix[0] - 0.5f, 0.0f, float(p.srcWidth - 1));
+    float sy = clamp((y + 0.5f) * p.matrix[1] - 0.5f, 0.0f, float(p.srcHeight - 1));
+    return bilinear(src, p, sx, sy);
+}
+
 kernel void shioriLayerOp(device uint *tar [[buffer(0)]],
                           device const uint *src [[buffer(1)]],
                           device const uint *dst [[buffer(2)]],
@@ -128,36 +183,37 @@ kernel void shioriLayerOp(device uint *tar [[buffer(0)]],
     uint si = p.srcOffset + gid.y * p.srcPitch + gid.x;
     uint di = p.dstOffset + gid.y * p.dstPitch + gid.x;
     uint opa = p.opa;
+    uint sv = p.op < 40 ? (p.sample ? sampled(src, p, gid) : src[si]) : 0;
     uint r;
     switch (p.op) {
     // ---- tar = f(tar, src)
-    case 1: r = src[si]; break;
-    case 2: r = 0xff000000u | src[si]; break;
-    case 3: r = (tar[ti] & 0xff000000u) + (src[si] & 0x00ffffffu); break;
-    case 4: r = (src[si] & 0xff000000u) + (tar[ti] & 0x00ffffffu); break;
-    case 10: { uint d = tar[ti], s = src[si]; r = (mixColour(d, s, s >> 24) & 0x00ffffffu) | (d & 0xff000000u); break; }
-    case 11: { uint d = tar[ti], s = src[si]; r = (mixColour(d, s, ((s >> 24) * opa) >> 8) & 0x00ffffffu) | (d & 0xff000000u); break; }
-    case 12: { uint d = tar[ti], s = src[si]; r = alphaOnAlpha(d, s, ((s >> 16) & 0xff00u) + (d >> 24), ooo, negmul); break; }
-    case 13: { uint d = tar[ti], s = src[si]; r = alphaOnAlpha(d, s, (((s >> 24) * opa) & 0xff00u) + (d >> 24), ooo, negmul); break; }
-    case 14: r = premulOver(tar[ti], premultiply(src[si])); break;
-    case 15: { uint s = src[si]; s = (s & 0xffffffu) + ((((s >> 24) * opa) >> 8) << 24); r = premulOver(tar[ti], premultiply(s)); break; }
-    case 20: { uint d = tar[ti]; r = (premulOverColour(d, src[si]) & 0x00ffffffu) | (d & 0xff000000u); break; }
+    case 1: r = sv; break;
+    case 2: r = 0xff000000u | sv; break;
+    case 3: r = (tar[ti] & 0xff000000u) + (sv & 0x00ffffffu); break;
+    case 4: r = (sv & 0xff000000u) + (tar[ti] & 0x00ffffffu); break;
+    case 10: { uint d = tar[ti], s = sv; r = (mixColour(d, s, s >> 24) & 0x00ffffffu) | (d & 0xff000000u); break; }
+    case 11: { uint d = tar[ti], s = sv; r = (mixColour(d, s, ((s >> 24) * opa) >> 8) & 0x00ffffffu) | (d & 0xff000000u); break; }
+    case 12: { uint d = tar[ti], s = sv; r = alphaOnAlpha(d, s, ((s >> 16) & 0xff00u) + (d >> 24), ooo, negmul); break; }
+    case 13: { uint d = tar[ti], s = sv; r = alphaOnAlpha(d, s, (((s >> 24) * opa) & 0xff00u) + (d >> 24), ooo, negmul); break; }
+    case 14: r = premulOver(tar[ti], premultiply(sv)); break;
+    case 15: { uint s = sv; s = (s & 0xffffffu) + ((((s >> 24) * opa) >> 8) << 24); r = premulOver(tar[ti], premultiply(s)); break; }
+    case 20: { uint d = tar[ti]; r = (premulOverColour(d, sv) & 0x00ffffffu) | (d & 0xff000000u); break; }
     case 21: {
-        uint d = tar[ti], s = src[si];
+        uint d = tar[ti], s = sv;
         s = (((s & 0xff00ffu) * opa >> 8) & 0xff00ffu) + (((s >> 8) & 0xff00ffu) * opa & 0xff00ff00u);
         r = (premulOverColour(d, s) & 0x00ffffffu) + (d & 0xff000000u);
         break;
     }
-    case 22: r = premulOver(tar[ti], src[si]); break;
+    case 22: r = premulOver(tar[ti], sv); break;
     case 23: {
-        uint s = src[si];
+        uint s = sv;
         s = (((s & 0xff00ffu) * opa >> 8) & 0xff00ffu) + (((s >> 8) & 0xff00ffu) * opa & 0xff00ff00u);
         r = premulOver(tar[ti], s);
         break;
     }
-    case 30: r = mixColour(tar[ti], src[si], opa); break;
-    case 31: { uint d = tar[ti]; r = alphaOnAlpha(d, src[si], (opa << 8) + (d >> 24), ooo, negmul); break; }
-    case 32: r = premulOver(tar[ti], (src[si] & 0xffffffu) | (opa << 24)); break;
+    case 30: r = mixColour(tar[ti], sv, opa); break;
+    case 31: { uint d = tar[ti]; r = alphaOnAlpha(d, sv, (opa << 8) + (d >> 24), ooo, negmul); break; }
+    case 32: r = premulOver(tar[ti], (sv & 0xffffffu) | (opa << 24)); break;
     // ---- tar = f(src, dst)
     case 40: r = mixColour(src[si], dst[di], opa); break;
     case 41: r = blendARGB(src[si], dst[di], opa); break;

@@ -30,6 +30,7 @@
 #include "shiori_metal_render.h"
 
 #import <Metal/Metal.h>
+#include <opencv2/opencv.hpp> // Shiori's stand-in (compat/): the warp matrices, as krkr2's software path makes them
 
 #include <algorithm>
 #include <atomic>
@@ -435,6 +436,7 @@ class Manager final : public iTVPRenderManager {
 public:
     Manager() {
         Software = TVPGetRenderManager(ttstr(TJS_W("software")));
+        StretchTypeId = Software->EnumParameterID("StretchType");
         auto member = &MethodTable::AllMethods;
         for (auto &entry : Software->*member) {
             auto *wrapped = new Method(entry.second);
@@ -513,7 +515,12 @@ public:
 
     int EnumParameterID(const char *name) override { return Software->EnumParameterID(name); }
     void SetParameterUInt(int id, unsigned int v) override { Software->SetParameterUInt(id, v); }
-    void SetParameterInt(int id, int v) override { Software->SetParameterInt(id, v); }
+    void SetParameterInt(int id, int v) override {
+        Software->SetParameterInt(id, v);
+        // The software manager's stretch type, as it keeps it (index into nearest, area,
+        // linear, cubic; anything past the last is cubic).
+        if (id >= 0 && id == StretchTypeId) StretchType = v > 4 ? 3 : v;
+    }
     void SetParameterPtr(int id, const void *v) override { Software->SetParameterPtr(id, v); }
     void SetParameterFloat(int id, float v) override { Software->SetParameterFloat(id, v); }
 
@@ -548,9 +555,18 @@ public:
                           const tTVPRect &rcclip, const tTVPPointD *pttar, const tRenderTexQuadArray &textures) override {
         auto started = std::chrono::steady_clock::now();
         ++DrawCount;
-        IdleAll(target, reftar, textures);
-        Software->OperateTriangles(Unwrap(method), nTriangles, target, reftar, rcclip, pttar, textures);
-        Count(method, "(triangles)", started);
+        auto *m = dynamic_cast<Method *>(method);
+        if (m && verifying() && ours(target) && Inside(rcclip, target)) {
+            VerifyWarp(m, nTriangles, target, reftar, rcclip, pttar, textures);
+            Count(method, "(triangles, verified)", started);
+            return;
+        }
+        bool onGPU = m && TryWarp(m, nTriangles, target, rcclip, pttar, textures);
+        if (!onGPU) {
+            IdleAll(target, reftar, textures);
+            Software->OperateTriangles(Unwrap(method), nTriangles, target, reftar, rcclip, pttar, textures);
+        }
+        Count(method, onGPU ? "(triangles, GPU)" : "(triangles)", started, onGPU);
     }
 
     void OperatePerspective(iTVPRenderMethod *method, int nQuads, iTVPTexture2D *target, iTVPTexture2D *reftar,
@@ -567,6 +583,19 @@ public:
 private:
     iTVPRenderManager *Software;
     unsigned DrawCount = 0;
+    int StretchTypeId = -1;
+    int StretchType = 0;
+
+    // The kernel's sampling for the current stretch type: nearest (1/3) or bilinear (2/4);
+    // 0 for what stays on the CPU (cubic; area when shrinking, for stretches).
+    int SampleMode(bool warp, bool shrinking) const {
+        switch (StretchType) {
+        case 0: return warp ? 1 : 3;
+        case 1: return warp ? 2 : (shrinking ? 0 : 4); // area: bilinear unless both shrink
+        case 2: return warp ? 2 : 4;
+        default: return 0;
+        }
+    }
 
     static bool Profiling() {
         static const bool on = getenv("SHIORIKRKR_PROFILE") != nullptr || verifying();
@@ -578,11 +607,160 @@ private:
         return m ? m->Inner : method;
     }
 
-    void Count(iTVPRenderMethod *method, const char *suffix, std::chrono::steady_clock::time_point started) {
+    void Count(iTVPRenderMethod *method, const char *suffix, std::chrono::steady_clock::time_point started,
+               bool onGPU = false) {
         if (!Profiling()) return;
         OpStat &s = Stats[method->GetName() + suffix];
         s.seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-        s.cpu += 1;
+        (onGPU ? s.gpu : s.cpu) += 1;
+    }
+
+    static bool IsBlt(const Kind &k) {
+        return k.shape == Shape::Blt || k.shape == Shape::BltAndOpa || k.shape == Shape::BltWithOpa;
+    }
+
+    // A blend of a sampled source (a stretch or a warp of `view` in `src`) into `rect` of `tar`.
+    void DispatchSampled(Method *m, Texture *tar, const tTVPRect &rect, Texture *src, const tTVPRect &view,
+                         unsigned sample, const float *matrix) {
+        KernelParams p = {};
+        p.width = unsigned(rect.get_width());
+        p.height = unsigned(rect.get_height());
+        p.tarPitch = unsigned(tar->GetPitch() / 4);
+        p.tarOffset = unsigned(rect.top) * p.tarPitch + unsigned(rect.left);
+        p.srcPitch = unsigned(src->GetPitch() / 4);
+        p.srcOffset = unsigned(view.top) * p.srcPitch + unsigned(view.left);
+        p.srcWidth = view.get_width();
+        p.srcHeight = view.get_height();
+        p.sample = sample;
+        for (int i = 0; i < 9; ++i) p.matrix[i] = matrix[i];
+        p.opa = unsigned(m->Opa);
+        p.color = m->Color;
+        p.op = m->K.op;
+        if (m->K.shape == Shape::BltAndOpa && m->Opa != 255) p.op = m->K.opOpa;
+        Dispatch(p, tar, src, nullptr, nullptr, nullptr);
+    }
+
+    // A stretched blend (krkr2's software path: clip to the target, move the source edges in
+    // proportion, resize, blend), on the GPU where the stretch type allows.
+    bool TryStretch(Method *m, Texture *tar, tTVPRect rctar, Texture *src, tTVPRect rcsrc) {
+        int sw = rcsrc.get_width(), sh = rcsrc.get_height(), dw = rctar.get_width(), dh = rctar.get_height();
+        if (dw == 0 || dh == 0 || sw == 0 || sh == 0) return true;
+        if (sw < 0 || sh < 0 || dw < 0 || dh < 0) return false; // flips
+        tTVPRect cr(0, 0, tar->GetWidth(), tar->GetHeight());
+        if (cr.left > rctar.left) {
+            rcsrc.left += (float)sw / dw * (cr.left - rctar.left);
+            rctar.left = cr.left;
+        }
+        if (cr.right < rctar.right) {
+            rcsrc.right -= (float)rcsrc.get_width() / rctar.get_width() * (rctar.right - cr.right);
+            rctar.right = cr.right;
+        }
+        if (cr.top > rctar.top) {
+            rcsrc.top += (float)sh / dh * (cr.top - rctar.top);
+            rctar.top = cr.top;
+        }
+        if (cr.bottom < rctar.bottom) {
+            rcsrc.bottom -= (float)rcsrc.get_height() / rctar.get_height() * (rctar.bottom - cr.bottom);
+            rctar.bottom = cr.bottom;
+        }
+        sw = rcsrc.get_width(), sh = rcsrc.get_height(), dw = rctar.get_width(), dh = rctar.get_height();
+        if (sh == 0 || sw == 0 || dh == 0 || dw == 0) return true;
+        if (sw < 0 || sh < 0 || dw < 0 || dh < 0 || !Inside(rcsrc, src) || !Inside(rctar, tar)) return false;
+        if (src == tar && Overlap(rcsrc, rctar)) return false;
+        const double sx = double(sw) / dw, sy = double(sh) / dh;
+        int mode = SampleMode(false, sx >= 1 && sy >= 1);
+        if (!mode) return false;
+        const float matrix[9] = {float(sx), float(sy), 0, 0, 0, 0, 0, 0, 0};
+        DispatchSampled(m, tar, rctar, src, rcsrc, unsigned(mode), matrix);
+        return true;
+    }
+
+    // krkr2's software path for two triangles making a quad: a rectangle-to-rectangle stretch,
+    // or a warp (affine when the target is a parallelogram, else perspective) of the source
+    // over the whole clip rectangle, blended in. On the GPU when the images and the stretch
+    // type allow it.
+    bool TryWarp(Method *m, int nTriangles, iTVPTexture2D *targetTex, const tTVPRect &rcclip, const tTVPPointD *dstpt,
+                 const tRenderTexQuadArray &textures) {
+        if (getenv("SHIORIKRKR_TRACE_WARP")) {
+            static int traced = 0;
+            if (traced++ < 5)
+                fprintf(stderr, "warp: %s n=%d tex=%zu blt=%d tar=%d src=%d same=%d bpp=%d/%d clip=%d,%d,%d,%d\n", m->GetName().c_str(),
+                        nTriangles, textures.size(), IsBlt(m->K), ours(targetTex) != nullptr,
+                        textures.size() ? ours(textures[0].first) != nullptr : -1, textures.size() ? targetTex == textures[0].first : -1,
+                        ours(targetTex) ? ours(targetTex)->BytesPerPixel() : -1,
+                        textures.size() && ours(textures[0].first) ? ours(textures[0].first)->BytesPerPixel() : -1,
+                        rcclip.left, rcclip.top, rcclip.right, rcclip.bottom);
+        }
+        if (!IsBlt(m->K) || textures.size() != 1 || nTriangles != 2) return false;
+        Texture *tar = ours(targetTex), *src = ours(textures[0].first);
+        if (!tar || !src || tar == src || tar->BytesPerPixel() != 4 || src->BytesPerPixel() != 4) return false;
+        const tTVPPointD *srcpt = textures[0].second;
+        auto quad = [](const tTVPPointD *pt) {
+            return pt[1].x == pt[3].x && pt[1].y == pt[3].y && pt[2].x == pt[4].x && pt[2].y == pt[4].y;
+        };
+        if (!quad(dstpt) || !quad(srcpt)) { if (getenv("SHIORIKRKR_TRACE_WARP")) fprintf(stderr, "warp: not quads\n"); return false; }
+        auto eq = [](double a, double b) { return std::fabs(a - b) < 0.001; };
+        const bool isSrcRect = eq(srcpt[0].y, srcpt[1].y) && eq(srcpt[1].x, srcpt[5].x) && eq(srcpt[0].x, srcpt[2].x) &&
+            eq(srcpt[2].y, srcpt[5].y);
+        const bool isDstRect = eq(dstpt[0].y, dstpt[1].y) && eq(dstpt[1].x, dstpt[5].x) && eq(dstpt[0].x, dstpt[2].x) &&
+            eq(dstpt[2].y, dstpt[5].y);
+        if (isSrcRect && isDstRect) {
+            tTVPRect dstrect(dstpt[0].x, dstpt[0].y, dstpt[5].x, dstpt[5].y);
+            tTVPRect refrect(srcpt[0].x, srcpt[0].y, srcpt[5].x, srcpt[5].y);
+            if (!(dstrect.left > dstrect.right || dstrect.top > dstrect.bottom || refrect.left > refrect.right ||
+                  refrect.top > refrect.bottom)) {
+                tTVPRect rcdest;
+                if (!TVPIntersectRect(&rcdest, rcclip, dstrect)) return true;
+                tjs_int dw = dstrect.get_width(), dh = dstrect.get_height();
+                tjs_int rw = refrect.get_width(), rh = refrect.get_height();
+                if (rcdest.left > dstrect.left) refrect.left += (float)rw / dw * (rcdest.left - dstrect.left);
+                if (rcdest.right < dstrect.right) refrect.right -= (float)rw / dw * (dstrect.right - rcdest.right);
+                if (rcdest.top > dstrect.top) refrect.top += (float)rh / dh * (rcdest.top - dstrect.top);
+                if (rcdest.bottom < dstrect.bottom) refrect.bottom -= (float)rh / dh * (dstrect.bottom - rcdest.bottom);
+                if (SameSize(refrect, rcdest)) {
+                    tRenderTexRectArray::Element one[] = {tRenderTexRectArray::Element(src, refrect)};
+                    return TryGPU(m, tar, rcdest, tRenderTexRectArray(one));
+                }
+                return TryStretch(m, tar, rcdest, src, refrect);
+            }
+        }
+        if (!Inside(rcclip, tar) || rcclip.get_width() <= 0 || rcclip.get_height() <= 0) return false;
+        // upper-left, upper-right, bottom-right, bottom-left
+        cv::Point2f ps[] = {cv::Point2f(srcpt[0].x, srcpt[0].y), cv::Point2f(srcpt[1].x + 1, srcpt[1].y),
+                            cv::Point2f(srcpt[5].x + 1, srcpt[5].y + 1), cv::Point2f(srcpt[2].x, srcpt[2].y + 1)};
+        cv::Point2f pd[] = {cv::Point2f(dstpt[0].x - rcclip.left, dstpt[0].y - rcclip.top),
+                            cv::Point2f(dstpt[1].x - rcclip.left, dstpt[1].y - rcclip.top),
+                            cv::Point2f(dstpt[5].x - rcclip.left, dstpt[5].y - rcclip.top),
+                            cv::Point2f(dstpt[2].x - rcclip.left, dstpt[2].y - rcclip.top)};
+        tTVPRect view(0, 0, src->GetWidth(), src->GetHeight());
+        if (isSrcRect) {
+            tTVPRect r(0x7FFFFFFF, 0x7FFFFFFF, -1, -1);
+            for (auto &pt : ps) {
+                tjs_int x = pt.x, y = pt.y;
+                if (x < r.left) r.left = x;
+                if (++x > r.right) r.right = x;
+                if (y < r.top) r.top = y;
+                if (++y > r.bottom) r.bottom = y;
+            }
+            for (auto &pt : ps) pt.x -= r.left, pt.y -= r.top;
+            if (r.get_width() > tjs_int(src->GetWidth())) r.set_width(src->GetWidth());
+            if (r.get_height() > tjs_int(src->GetHeight())) r.set_height(src->GetHeight());
+            view = r;
+        }
+        if (!Inside(view, src)) { if (getenv("SHIORIKRKR_TRACE_WARP")) fprintf(stderr, "warp: view %d,%d,%d,%d outside %u x %u\n", view.left, view.top, view.right, view.bottom, src->GetWidth(), src->GetHeight()); return false; }
+        const bool affine = isSrcRect && [&] {
+            auto d = [](const tTVPPointD &a, const tTVPPointD &b) { return (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y); };
+            return eq(d(dstpt[0], dstpt[1]), d(dstpt[2], dstpt[3])) && eq(d(dstpt[1], dstpt[2]), d(dstpt[0], dstpt[3]));
+        }();
+        const cv::Mat forward = affine ? cv::getAffineTransform(ps, pd) : cv::getPerspectiveTransform(ps, pd);
+        double inv[9];
+        if (!cv::detail::invert3(forward.m, inv)) return true; // the software path draws nothing either
+        int mode = SampleMode(true, false);
+        if (!mode) { if (getenv("SHIORIKRKR_TRACE_WARP")) fprintf(stderr, "warp: stretch type %d\n", StretchType); return false; }
+        float matrix[9];
+        for (int i = 0; i < 9; ++i) matrix[i] = float(inv[i]);
+        DispatchSampled(m, tar, rcclip, src, view, unsigned(mode), matrix);
+        return true;
     }
 
     template <typename Array>
@@ -663,8 +841,11 @@ private:
         case Shape::None:
             return false;
         }
+        if (IsBlt(k) && n == 1 && src && src->BytesPerPixel() == 4 && tar->BytesPerPixel() == 4 &&
+            !SameSize(rs, rctar))
+            return TryStretch(m, tar, rctar, src, rs);
         if (k.shape != Shape::Fill) {
-            if (!src || !SameSize(rs, rctar) || !Inside(rs, src)) return false; // stretches, flips: CPU
+            if (!src || !SameSize(rs, rctar) || !Inside(rs, src)) return false; // flips: CPU
             if (src->BytesPerPixel() != 4) return false;
             if (src == tar && !(rs == rctar) && Overlap(rs, rctar)) return false;
         }
@@ -741,6 +922,51 @@ private:
         if (rule) rule->MarkUsed(serial);
         // Keep a long frame's work moving.
         if (g.openDispatches >= 256) g.commit();
+    }
+
+    // Warps and stretches sample in float on the GPU and in double on the CPU: a byte may differ
+    // by one, a pixel at an edge may come from its neighbour. Reports how many pixels differ by
+    // more than one in a byte; keeps the CPU's.
+    void VerifyWarp(Method *m, int nTriangles, iTVPTexture2D *targetTex, iTVPTexture2D *reftar, const tTVPRect &rc,
+                    const tTVPPointD *pt, const tRenderTexQuadArray &textures) {
+        Texture *tar = ours(targetTex);
+        IdleAll(targetTex, reftar, textures);
+        const int w = rc.get_width(), h = rc.get_height();
+        auto save = [&](std::vector<uint32_t> &out) {
+            out.resize(size_t(w) * h);
+            for (int y = 0; y < h; ++y)
+                memcpy(&out[size_t(y) * w], tar->Raw() + size_t(rc.top + y) * tar->GetPitch() + size_t(rc.left) * 4, size_t(w) * 4);
+        };
+        std::vector<uint32_t> before, gpuResult, cpuResult;
+        save(before);
+        bool onGPU = TryWarp(m, nTriangles, targetTex, rc, pt, textures);
+        if (onGPU) {
+            gpu().commit();
+            tar->Idle();
+            save(gpuResult);
+            for (int y = 0; y < h; ++y)
+                memcpy(tar->Raw() + size_t(rc.top + y) * tar->GetPitch() + size_t(rc.left) * 4, &before[size_t(y) * w], size_t(w) * 4);
+        }
+        Software->OperateTriangles(m->Inner, nTriangles, targetTex, reftar, rc, pt, textures);
+        if (!onGPU) return;
+        save(cpuResult);
+        size_t off = 0;
+        for (size_t i = 0; i < cpuResult.size(); ++i)
+            for (int b = 0; b < 32; b += 8) {
+                int d = int((cpuResult[i] >> b) & 0xff) - int((gpuResult[i] >> b) & 0xff);
+                if (d > 1 || d < -1) {
+                    ++off;
+                    break;
+                }
+            }
+        OpStat &st = Stats[m->GetName() + "(warp check)"];
+        st.gpu += 1;
+        st.pixels += cpuResult.size();
+        if (off * 1000 > cpuResult.size()) { // more than 0.1% of the pixels
+            if (st.mismatches++ < 3)
+                fprintf(stderr, "shiorikrkr metal verify: %s warp: %zu of %zu pixels differ (stretch type %d)\n",
+                        m->GetName().c_str(), off, cpuResult.size(), StretchType);
+        }
     }
 
     // Runs the operation on the GPU and on the CPU from the same starting pixels, compares
