@@ -30,6 +30,9 @@ extern double ShioriEmoteDrawSeconds;
 #include <vector>
 
 #include "shiorikrkr_emote.h"
+#include "render/shiori_metal_render.h"
+#include "RenderManager.h"
+#include "LayerBitmapIntf.h"
 
 #define NCB_MODULE_NAME TJS_W("emoteplayer.dll")
 
@@ -280,11 +283,44 @@ tTJSNI_BaseLayer *layerOf(iTJSDispatch2 *object) {
 // Motion.D3DAdaptor: the canvas the Direct3D path draws characters on (NEKOPARA Extra and
 // Vol. 4 take it): players draw into it, captureCanvas copies it into a layer and starts the
 // next frame clear.
+namespace {
+// Whether characters draw on the GPU: the host can, and the images are the Metal compositor's.
+bool drawsOnGPU() {
+    const shiorikrkr_emote_host_t *h = shiorikrkr::emoteHost();
+    if (!h || !h->draw_gpu) return false;
+    static const bool metal = std::string(TVPGetRenderManager()->GetName()) == "Metal";
+    return metal;
+}
+
+// A layer's image as the compositor's texture, ready to be drawn over whole.
+iTVPTexture2D *layerTexture(tTJSNI_BaseLayer *layer) {
+    tTVPBaseTexture *image = layer ? layer->GetMainImage() : nullptr;
+    if (!image) return nullptr;
+    tTVPRect all(0, 0, tjs_int(layer->GetImageWidth()), tjs_int(layer->GetImageHeight()));
+    return image->GetTextureForRender(false, &all);
+}
+
+// Fills a texture of the compositor's with an ARGB colour.
+void fillTexture(iTVPTexture2D *texture, tjs_uint32 argb) {
+    iTVPRenderManager *manager = TVPGetRenderManager();
+    static iTVPRenderMethod *fill = manager->GetRenderMethod("FillARGB");
+    static int color = fill->EnumParameterID("color");
+    // As the pixel reads in memory (R, G, B, A).
+    const tjs_uint32 rgba = (argb & 0xFF00FF00) | ((argb >> 16) & 0xFF) | ((argb & 0xFF) << 16);
+    fill->SetParameterColor4B(color, rgba);
+    manager->OperateRect(fill, texture, nullptr, tTVPRect(0, 0, texture->GetWidth(), texture->GetHeight()),
+                         tRenderTexRectArray());
+}
+} // namespace
+
 class ShioriD3DAdaptor {
 public:
     ShioriD3DAdaptor(iTJSDispatch2 *, tjs_int width, tjs_int height, tjs_int left, tjs_int top)
-        : width_(std::max<tjs_int>(width, 0)), height_(std::max<tjs_int>(height, 0)),
-          pixels_(size_t(width_) * height_ * 4, 0) {
+        : width_(std::max<tjs_int>(width, 0)), height_(std::max<tjs_int>(height, 0)) {
+        if (width_ && height_ && drawsOnGPU())
+            texture_ = TVPGetRenderManager()->CreateTexture2D(nullptr, 0, width_, height_, TVPTextureFormat::RGBA);
+        else
+            pixels_.assign(size_t(width_) * height_ * 4, 0);
         if (getenv("SHIORIKRKR_TRACE_EMOTE"))
             fprintf(stderr, "D3DAdaptor %d,%d %dx%d\n", int(left), int(top), int(width), int(height));
     }
@@ -292,8 +328,14 @@ public:
         clear_ = argb;
         clearCanvas();
     }
+    ~ShioriD3DAdaptor() {
+        if (texture_) texture_->Release();
+    }
     void captureCanvas(iTJSDispatch2 *target);
     void unloadUnusedTextures() {}
+
+    /// The canvas as the compositor's texture (GPU drawing), or null (CPU drawing).
+    iTVPTexture2D *texture() const { return texture_; }
 
     uint8_t *pixels() { return pixels_.data(); }
     // Only the rectangle the host reports is read back, and the host writes all of it.
@@ -326,6 +368,10 @@ public:
 
 private:
     void clearCanvas() {
+        if (texture_) {
+            fillTexture(texture_, clear_);
+            return;
+        }
         // ARGB to the R, G, B, A krkr2 keeps pixels in.
         const uint8_t px[4] = {uint8_t(clear_ >> 16), uint8_t(clear_ >> 8), uint8_t(clear_), uint8_t(clear_ >> 24)};
         for (size_t i = 0; i < pixels_.size(); i += 4) memcpy(&pixels_[i], px, 4);
@@ -333,6 +379,7 @@ private:
 
     int width_, height_;
     std::vector<uint8_t> pixels_, scratch_;
+    iTVPTexture2D *texture_ = nullptr;
     tjs_uint32 clear_ = 0;
 };
 
@@ -391,6 +438,13 @@ public:
     void draw(iTJSDispatch2 *target) {
         if (auto *canvas = target ? ncbInstanceAdaptor<ShioriD3DAdaptor>::GetNativeInstance(target) : nullptr) {
             if (!ensure() || !host() || !canvas->width() || !canvas->height()) return;
+            if (canvas->texture()) {
+                hostCommand(player(), "show");
+                const auto drawStart = std::chrono::steady_clock::now();
+                drawGPU(canvas->texture(), canvas->width(), canvas->height(), true);
+                ShioriEmoteDrawSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - drawStart).count();
+                return;
+            }
             hostCommand(player(), "show");
             int32_t bounds[4] = {0, 0, 0, 0};
             const auto drawStart = std::chrono::steady_clock::now();
@@ -409,6 +463,19 @@ public:
         }
         tTJSNI_BaseLayer *layer = layerOf(target);
         if (!layer || !ensure() || !host()) return;
+        if (drawsOnGPU()) {
+            // On the GPU, into the layer's image whole (the character's own layer).
+            if (iTVPTexture2D *texture = layerTexture(layer)) {
+                hostCommand(player(), "show");
+                const auto drawStart = std::chrono::steady_clock::now();
+                const bool drew = drawGPU(texture, int(layer->GetImageWidth()), int(layer->GetImageHeight()), false);
+                ShioriEmoteDrawSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - drawStart).count();
+                if (drew) {
+                    layer->Update();
+                    return;
+                }
+            }
+        }
         auto *pixels = static_cast<uint8_t *>(layer->GetMainImagePixelBufferForWrite());
         if (!pixels) return;
         const tjs_int pitch = layer->GetMainImagePixelBufferPitch();
@@ -428,6 +495,15 @@ public:
             TVPAddLog(ttstr(line));
         }
         layer->Update();
+    }
+
+    // Encodes the character into a texture of the compositor's (blend: over what is there).
+    bool drawGPU(iTVPTexture2D *texture, int width, int height, bool blend) {
+        return shiori::metal::encodeInto(texture, [&](void *buffer, size_t pitch, void *commands) {
+            return host()->draw_gpu(host()->context, player(), buffer, std::min<int>(width, int(texture->GetWidth())),
+                                    std::min<int>(height, int(texture->GetHeight())), int(pitch), affine_, commands,
+                                    blend ? 1 : 0) != 0;
+        });
     }
 
     static tjs_error setCoord(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
@@ -684,6 +760,19 @@ void ShioriD3DAdaptor::captureCanvas(iTJSDispatch2 *target) {
     if (!layer || !width_ || !height_) return;
     if (int(layer->GetImageWidth()) != width_ || int(layer->GetImageHeight()) != height_)
         layer->SetImageSize(width_, height_);
+    if (texture_) {
+        // Canvas to layer on the GPU, then the canvas cleared for the next frame.
+        iTVPTexture2D *out = layerTexture(layer);
+        if (!out) return;
+        iTVPRenderManager *manager = TVPGetRenderManager();
+        static iTVPRenderMethod *copy = manager->GetRenderMethod("Copy");
+        const tTVPRect all(0, 0, width_, height_);
+        tRenderTexRectArray::Element from[] = {tRenderTexRectArray::Element(texture_, all)};
+        manager->OperateRect(copy, out, nullptr, all, tRenderTexRectArray(from));
+        layer->Update();
+        clearCanvas();
+        return;
+    }
     auto *out = static_cast<uint8_t *>(layer->GetMainImagePixelBufferForWrite());
     if (!out) return;
     const tjs_int pitch = layer->GetMainImagePixelBufferPitch();

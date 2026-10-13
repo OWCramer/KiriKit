@@ -69,6 +69,14 @@ typedef struct shiorikrkr_emote_host {
      * right and bottom exclusive). Returns 1 when it drew anything. */
     int32_t (*draw)(void *context, void *player, uint8_t *rgba, int32_t width, int32_t height,
                     int32_t pitch, const double *transform, int32_t *bounds);
+    /* Since API version 4. Draws on the GPU instead, into a shared Metal buffer (an
+     * id<MTLBuffer>: width x height pixels in rows of pitch bytes, R, G, B, A, straight alpha),
+     * encoded into the engine's command buffer (an id<MTLCommandBuffer> with no encoder open),
+     * so that the engine's own GPU work follows it and nothing waits. blend 0 replaces every
+     * pixel (clear where the character isn't), 1 draws the character over what is there.
+     * Returns 1 when it encoded anything. NULL: the engine uses draw. */
+    int32_t (*draw_gpu)(void *context, void *player, void *buffer, int32_t width, int32_t height,
+                        int32_t pitch, const double *transform, void *command_buffer, int32_t blend);
 } shiorikrkr_emote_host_t;
 
 typedef struct shiorikrkr_config {

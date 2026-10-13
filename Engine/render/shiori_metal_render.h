@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 class iTVPTexture2D;
@@ -18,6 +19,12 @@ void flush();
 
 /// The per-operation profile since the last report, averaged over `ticks`; clears it.
 std::string profileReport(double ticks);
+
+/// Lets `encode` put GPU work on one of this renderer's images: it gets the image's Metal buffer
+/// (an `id<MTLBuffer>`, unretained; R, G, B, A rows of `pitch` bytes) and the renderer's open
+/// command buffer (an `id<MTLCommandBuffer>`, no encoder open), so the work runs in order with
+/// the renderer's own and nothing waits. False when the image isn't this renderer's.
+bool encodeInto(iTVPTexture2D *texture, const std::function<bool(void *buffer, size_t pitch, void *commandBuffer)> &encode);
 
 struct PresentedFrame {
     void *texture = nullptr; // id<MTLTexture>, RGBA8 (unretained; the renderer keeps it)

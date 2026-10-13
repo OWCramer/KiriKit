@@ -20,6 +20,8 @@ public final class KrkrEmoteHost {
     private let queue: MTLCommandQueue?
     private var target: MTLTexture?
     private var finished: MTLTexture?
+    /// The drawing target for GPU drawing (into the engine's buffers).
+    private var gpuTarget: MTLTexture?
     private let finisher: EmoteFinisher?
     /// The title's PSB seed, once a model has given it (every model of a game shares it).
     private var seed: UInt32?
@@ -88,6 +90,16 @@ public final class KrkrEmoteHost {
                 }
             }
             return value
+        }
+        t.draw_gpu = { context, player, buffer, width, height, pitch, transform, commandBuffer, blend in
+            guard let context, let player, let buffer, let transform, let commandBuffer else { return 0 }
+            let host = Unmanaged<KrkrEmoteHost>.fromOpaque(context).takeUnretainedValue()
+            let p = Unmanaged<KrkrEmotePlayer>.fromOpaque(player).takeUnretainedValue()
+            let out = Unmanaged<AnyObject>.fromOpaque(buffer).takeUnretainedValue() as! MTLBuffer
+            let commands = Unmanaged<AnyObject>.fromOpaque(commandBuffer).takeUnretainedValue() as! MTLCommandBuffer
+            let m = (0..<6).map { transform[$0] }
+            return host.drawGPU(p, into: out, width: Int(width), height: Int(height), pitch: Int(pitch), transform: m,
+                                commands: commands, blend: blend != 0) ? 1 : 0
         }
         t.draw = { context, player, rgba, width, height, pitch, transform, bounds in
             guard let context, let player, let rgba, let transform, let bounds else { return 0 }
@@ -190,6 +202,46 @@ public final class KrkrEmoteHost {
     }
 
     // MARK: Drawing
+
+    /// Encodes `p` into a layer's buffer on the engine's command buffer (nothing waits): every
+    /// pixel replaced (clear where the character isn't), or the character over them when
+    /// `blend`. False when nothing was encoded.
+    func drawGPU(_ p: KrkrEmotePlayer, into out: MTLBuffer, width: Int, height: Int, pitch: Int, transform: [Double],
+                 commands: MTLCommandBuffer, blend: Bool) -> Bool {
+        guard let gpu, let finisher, width > 0, height > 0, pitch % 4 == 0 else { return false }
+        let tint = p.tint
+        let visible = p.shown && tint.a > 0
+        if !visible && blend { return false }
+        if gpuTarget == nil || gpuTarget!.width != width || gpuTarget!.height != height {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+            d.usage = [.renderTarget, .shaderRead]
+            d.storageMode = .private
+            gpuTarget = gpu.device.makeTexture(descriptor: d)
+        }
+        guard let target = gpuTarget else { return false }
+        var prepared: [EmoteGPU.Prepared] = []
+        if visible {
+            let pose = p.pose()
+            let place = p.placement(transform)
+            for (i, renderer) in p.renderers.enumerated() {
+                var variables = pose
+                p.models[i].applySelectors(&variables)
+                let list = renderer.drawList(variables: variables, transform: place)
+                if let ready = gpu.prepare(list, model: p.models[i], buffer: commands) { prepared.append(ready) }
+            }
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return false }
+        for ready in prepared { gpu.draw(ready, encoder: encoder, width: width, height: height) }
+        encoder.endEncoding()
+        finisher.encode(commands, drawn: target, into: out, pitch: pitch / 4, width: width, height: height,
+                        tint: SIMD4(Float(tint.r), Float(tint.g), Float(tint.b), Float(tint.a)), blend: blend)
+        return true
+    }
 
     /// Draws `p` and copies the covered part into `rgba` (straight alpha); returns that
     /// part's rectangle, or nil when nothing was drawn.

@@ -15,6 +15,7 @@
 #include "UtilStreams.h"
 #include "DebugIntf.h"
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
@@ -23,6 +24,10 @@
 #include <vector>
 
 #include "shiorikrkr_emote.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstring>
 
 
 namespace shiorikrkr {
@@ -33,10 +38,12 @@ bool g_hasHost = false;
 } // namespace
 
 void setEmoteHost(const shiorikrkr_emote_host_t *host) {
-    g_hasHost = host && host->struct_size >= sizeof(shiorikrkr_emote_host_t) && host->create && host->command &&
-                host->query && host->draw && host->destroy;
-    if (g_hasHost) g_host = *host;
-    else g_host = {};
+    // Hosts from before draw_gpu end at it.
+    const size_t minimum = offsetof(shiorikrkr_emote_host_t, draw_gpu);
+    g_hasHost = host && host->struct_size >= minimum && host->create && host->command && host->query && host->draw &&
+                host->destroy;
+    g_host = {};
+    if (g_hasHost) memcpy(&g_host, host, std::min<size_t>(host->struct_size, sizeof(g_host)));
 }
 
 const shiorikrkr_emote_host_t *emoteHost() { return g_hasHost ? &g_host : nullptr; }

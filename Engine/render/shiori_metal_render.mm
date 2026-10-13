@@ -37,6 +37,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -100,12 +101,10 @@ struct Device {
 
     // The encoder of the open command buffer, opening one if there's none.
     id<MTLComputeCommandEncoder> encoderForDispatch(uint64_t &serial) {
-        if (!open) {
-            open = [queue commandBuffer];
-            openSerial = nextSerial++;
+        openCommandBuffer();
+        if (!encoder) {
             encoder = [open computeCommandEncoder];
             [encoder setComputePipelineState:pipeline];
-            openDispatches = 0;
         }
         serial = openSerial;
         ++openDispatches;
@@ -113,10 +112,29 @@ struct Device {
         return encoder;
     }
 
+    // The open command buffer, opening one if there's none.
+    void openCommandBuffer() {
+        if (open) return;
+        open = [queue commandBuffer];
+        openSerial = nextSerial++;
+        openDispatches = 0;
+    }
+
+    // The open command buffer with no encoder open on it (for others' passes).
+    id<MTLCommandBuffer> bareCommandBuffer(uint64_t &serial) {
+        openCommandBuffer();
+        if (encoder) {
+            [encoder endEncoding];
+            encoder = nil;
+        }
+        serial = openSerial;
+        return open;
+    }
+
     void commit() {
         std::lock_guard<std::recursive_mutex> lock(mutex);
         if (!open) return;
-        [encoder endEncoding];
+        if (encoder) [encoder endEncoding];
         encoder = nil;
         finish();
     }
@@ -125,14 +143,7 @@ struct Device {
     // event, commits. Returns the event value the copy is done at.
     uint64_t commitFrame(id<MTLBuffer> buffer, size_t pitch, int w, int h, id<MTLTexture> into, uint64_t &serial) {
         std::lock_guard<std::recursive_mutex> lock(mutex);
-        if (open) {
-            [encoder endEncoding];
-            encoder = nil;
-        } else {
-            open = [queue commandBuffer];
-            openSerial = nextSerial++;
-        }
-        serial = openSerial;
+        bareCommandBuffer(serial);
         id<MTLBlitCommandEncoder> blit = [open blitCommandEncoder];
         [blit copyFromBuffer:buffer sourceOffset:0 sourceBytesPerRow:pitch sourceBytesPerImage:pitch * h
                   sourceSize:MTLSizeMake(w, h, 1) toTexture:into destinationSlice:0 destinationLevel:0
@@ -1079,6 +1090,18 @@ std::string profileReport(double ticks) {
     g.syncs = g.commits = g.dispatches = 0;
     g.syncSeconds = 0;
     return out;
+}
+
+bool encodeInto(iTVPTexture2D *texture, const std::function<bool(void *, size_t, void *)> &encode) {
+    Texture *t = ours(texture);
+    if (!t || t->BytesPerPixel() != 4) return false;
+    Device &g = gpu();
+    std::lock_guard<std::recursive_mutex> lock(g.mutex);
+    uint64_t serial = 0;
+    id<MTLCommandBuffer> commands = g.bareCommandBuffer(serial);
+    const bool encoded = encode((__bridge void *)t->Buffer(), size_t(t->GetPitch()), (__bridge void *)commands);
+    t->MarkUsed(serial);
+    return encoded;
 }
 
 bool presentFrame(iTVPTexture2D *texture, int width, int height, bool changed, PresentedFrame &out) {
