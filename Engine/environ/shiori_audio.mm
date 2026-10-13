@@ -283,7 +283,12 @@ public:
         AudioComponentInstanceDispose(Unit);
         Unit = nullptr;
         Running = false;
+        // The last game's streams are its own (any it never freed stay silent).
+        std::lock_guard<std::mutex> lock(Lock);
+        Streams.clear();
     }
+
+    bool started() const { return Unit != nullptr; }
 
     void add(Stream *s) {
         std::lock_guard<std::mutex> lock(Lock);
@@ -324,8 +329,10 @@ Stream::~Stream() {
 } // namespace
 
 void TVPInitDirectSound(int) {
-    if (theMixer) return;
-    theMixer = new Mixer();
+    // The mixer once per process; its output again for each game (it's shut down when a game
+    // is left, and the next game played in silence when this only ran once).
+    if (!theMixer) theMixer = new Mixer();
+    if (theMixer->started()) return;
     if (!theMixer->start()) shiori::log("ShioriKrkr: audio output couldn't start");
 }
 

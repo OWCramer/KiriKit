@@ -6,6 +6,7 @@ import CatSystemKit
 import CShioriKrkr
 import Foundation
 import Metal
+import QuartzCore
 
 /// The E-mote side of ShioriKrkr's host interface (`shiorikrkr_emote_host_t`): models read
 /// with CatSystemKit, played by `KrkrEmotePlayer` and drawn with CatSystemKit's Metal
@@ -221,14 +222,25 @@ public final class KrkrEmoteHost {
         guard let target = gpuTarget else { return false }
         var prepared: [EmoteGPU.Prepared] = []
         if visible {
+            keepTextures(for: p, gpu: gpu)
+            let t0 = Self.timing ? CACurrentMediaTime() : 0
             let pose = p.pose()
+            let t1 = Self.timing ? CACurrentMediaTime() : 0
             let place = p.placement(transform)
+            var listTime = 0.0, prepareTime = 0.0
             for (i, renderer) in p.renderers.enumerated() {
                 var variables = pose
                 p.models[i].applySelectors(&variables)
+                let a = Self.timing ? CACurrentMediaTime() : 0
                 let list = renderer.drawList(variables: variables, transform: place)
+                let b = Self.timing ? CACurrentMediaTime() : 0
                 if let ready = gpu.prepare(list, model: p.models[i], buffer: commands) { prepared.append(ready) }
+                if Self.timing {
+                    listTime += b - a
+                    prepareTime += CACurrentMediaTime() - b
+                }
             }
+            if Self.timing { noteTiming(pose: t1 - t0, list: listTime, prepare: prepareTime) }
         }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
@@ -241,6 +253,34 @@ public final class KrkrEmoteHost {
         finisher.encode(commands, drawn: target, into: out, pitch: pitch / 4, width: width, height: height,
                         tint: SIMD4(Float(tint.r), Float(tint.g), Float(tint.b), Float(tint.a)), blend: blend)
         return true
+    }
+
+    /// SHIORIKRKR_TIME_EMOTE: where drawing a character's frame goes, every 600 draws.
+    static let timing = ProcessInfo.processInfo.environment["SHIORIKRKR_TIME_EMOTE"] != nil
+    private var timed = (draws: 0, pose: 0.0, list: 0.0, prepare: 0.0)
+
+    private func noteTiming(pose: Double, list: Double, prepare: Double) {
+        timed.draws += 1
+        timed.pose += pose
+        timed.list += list
+        timed.prepare += prepare
+        guard timed.draws == 600 else { return }
+        let n = Double(timed.draws) / 1000
+        print(String(format: "E-mote draw (600): pose %.2f ms, draw list %.2f ms, prepare %.2f ms each",
+                     timed.pose / n, timed.list / n, timed.prepare / n))
+        timed = (0, 0, 0, 0)
+    }
+
+    /// Models drawn lately, and when: their textures stay on the GPU. With more characters on
+    /// screen than the texture cache held (six), every frame uploaded some again and waited for
+    /// it (NEKOPARA with seven cats on screen ran at about 20 fps).
+    private var lastDrawn: [ObjectIdentifier: CFTimeInterval] = [:]
+
+    private func keepTextures(for p: KrkrEmotePlayer, gpu: EmoteGPU) {
+        let now = CACurrentMediaTime()
+        for model in p.models { lastDrawn[ObjectIdentifier(model)] = now }
+        lastDrawn = lastDrawn.filter { now - $0.value < 2 }
+        gpu.textureLimit = max(6, lastDrawn.count + 2)
     }
 
     /// Draws `p` and copies the covered part into `rgba` (straight alpha); returns that
@@ -268,6 +308,7 @@ public final class KrkrEmoteHost {
         }
         guard let target, let finished, let buffer = queue.makeCommandBuffer() else { return nil }
         let started = Self.trace ? Date() : nil
+        keepTextures(for: p, gpu: gpu)
         let pose = p.pose()
         let place = p.placement(transform)
         var prepared: [EmoteGPU.Prepared] = []

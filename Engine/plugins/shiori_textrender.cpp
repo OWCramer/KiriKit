@@ -37,6 +37,9 @@ struct Style {
     tjs_int fontSize = 24, rubySize = 10, rubyOffset = -2;
     tjs_uint32 chColor = 0xffffff, shadowColor = 0x000000, edgeColor = 0x0080ff;
     tjs_int lineSpacing = 6, pitch = 0, lineSize = 0;
+    // Where lines sit across the box (-1 left, 0 centre, 1 right) and the text down it
+    // (-1 top, 0 middle, 1 bottom).
+    tjs_int align = -1, valign = -1;
 };
 
 struct Ruby {
@@ -118,6 +121,7 @@ public:
     // ---- rendering ----
     void clear() {
         chars_.clear();
+        placedChars_ = 0;
         keyWait_.clear();
         state_ = default_;
         x_ = 0;
@@ -128,7 +132,7 @@ public:
         lineTop_ = 0;
         lineHeight_ = 0;
         time_ = 0;
-        align_ = -1;
+        align_ = default_.align;
         overflow_ = false;
         pendingIndent_ = false;
         widthCache_.clear();
@@ -165,7 +169,10 @@ public:
         return !overflow_;
     }
 
-    void done() { flushLine(); }
+    void done() {
+        flushLine();
+        placeVertically();
+    }
 
     void newline() {
         flushLine();
@@ -275,6 +282,8 @@ public:
     SHIORI_TR_INT(defaultLineSpacing, default_.lineSpacing)
     SHIORI_TR_INT(defaultPitch, default_.pitch)
     SHIORI_TR_INT(defaultLineSize, default_.lineSize)
+    SHIORI_TR_INT(defaultAlign, default_.align)
+    SHIORI_TR_INT(defaultVAlign, default_.valign)
     tjs_real get_fontScale() const { return fontScale_; }
     void set_fontScale(tjs_real v) { fontScale_ = v > 0 ? v : 1; }
 
@@ -357,6 +366,8 @@ private:
         if (has(d, TJS_W("lineSpacing"), x)) s.lineSpacing = tjs_int(x.AsInteger());
         if (has(d, TJS_W("pitch"), x)) s.pitch = tjs_int(x.AsInteger());
         if (has(d, TJS_W("lineSize"), x)) s.lineSize = tjs_int(x.AsInteger());
+        if (has(d, TJS_W("align"), x)) s.align = tjs_int(x.AsInteger());
+        if (has(d, TJS_W("valign"), x)) s.valign = tjs_int(x.AsInteger());
     }
 
     tjs_int scaled(tjs_int size) const { return tjs_int(std::lround(size * fontScale_)); }
@@ -716,6 +727,23 @@ private:
         ++line_;
     }
 
+    // The whole text down the box by the style's valign (top, middle, bottom).
+    void placeVertically() {
+        if (default_.valign < 0 || boxHeight_ <= 0 || chars_.empty() || vertical_ || placedChars_ == chars_.size()) return;
+        double top = 1e9, bottom = -1e9;
+        for (size_t i = placedChars_; i < chars_.size(); ++i) {
+            top = std::min(top, chars_[i].y);
+            bottom = std::max(bottom, chars_[i].y + chars_[i].size);
+        }
+        const double room = boxHeight_ - (bottom - top);
+        const double shift = (default_.valign == 0 ? room / 2 : room) - top;
+        for (size_t i = placedChars_; i < chars_.size(); ++i) {
+            chars_[i].y += shift;
+            for (Ruby &r : chars_[i].ruby) r.y += shift;
+        }
+        placedChars_ = chars_.size();
+    }
+
     tjs_int bounds(int which) const {
         if (chars_.empty()) return 0;
         double l = 1e9, t = 1e9, r = -1e9, b = -1e9;
@@ -783,6 +811,7 @@ private:
     size_t rubyCharIndex_ = 0;
     std::vector<size_t> rubySpanChars_;
     std::map<u16, double> widthCache_;
+    size_t placedChars_ = 0; // characters already placed down the box (valign)
 };
 
 static tjs_error ShioriTextRenderFactory(ShioriTextRender **result, tjs_int count, tTJSVariant **param,
@@ -861,5 +890,7 @@ NCB_REGISTER_CLASS_DIFFER(TextRenderBase, ShioriTextRender) {
     SHIORI_TR_PROPERTY(defaultLineSpacing);
     SHIORI_TR_PROPERTY(defaultPitch);
     SHIORI_TR_PROPERTY(defaultLineSize);
+    SHIORI_TR_PROPERTY(defaultAlign);
+    SHIORI_TR_PROPERTY(defaultVAlign);
     SHIORI_TR_PROPERTY(fontScale);
 }

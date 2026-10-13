@@ -865,7 +865,14 @@ private:
             eq(srcpt[2].y, srcpt[5].y);
         const bool isDstRect = eq(dstpt[0].y, dstpt[1].y) && eq(dstpt[1].x, dstpt[5].x) && eq(dstpt[0].x, dstpt[2].x) &&
             eq(dstpt[2].y, dstpt[5].y);
-        if (isSrcRect && isDstRect) {
+        // A rectangle placed between pixels (a slow pan: KARAKARA's sky moves a third of a pixel a
+        // frame) is sampled where it really is when the stretch type filters, as KiriKiri's own
+        // affine drawing does; krkr2's rectangle path would snap it to whole pixels, so it moved in
+        // visible steps a few times a second.
+        auto whole = [](double v) { return std::fabs(v - std::round(v)) < 0.01; };
+        const bool betweenPixels = StretchType != 0 && !(whole(dstpt[0].x) && whole(dstpt[0].y) && whole(dstpt[5].x) &&
+                                                         whole(dstpt[5].y));
+        if (isSrcRect && isDstRect && !betweenPixels) {
             tTVPRect dstrect(dstpt[0].x, dstpt[0].y, dstpt[5].x, dstpt[5].y);
             tTVPRect refrect(srcpt[0].x, srcpt[0].y, srcpt[5].x, srcpt[5].y);
             if (!(dstrect.left > dstrect.right || dstrect.top > dstrect.bottom || refrect.left > refrect.right ||
