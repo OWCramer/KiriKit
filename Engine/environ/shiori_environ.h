@@ -43,6 +43,9 @@ void resetExit();
 class WindowLayer;
 WindowLayer *activeWindowLayer();
 WindowLayer *mainWindowLayer();
+/// After a game stops: forgets window layers its shutdown left behind (their windows are gone),
+/// so the next game's window is the one shown. Returns how many there were.
+int forgetWindowLayers();
 // The texture the window last showed (the layer manager's composed buffer), or null.
 iTVPTexture2D *windowTexture(WindowLayer *layer);
 // The canvas size of the window (its inner size in the game's pixels).

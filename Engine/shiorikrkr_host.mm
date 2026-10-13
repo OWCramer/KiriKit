@@ -51,6 +51,10 @@ extern int _argc;
 extern char **_argv;
 extern bool TVPTerminated;
 void TVPShioriPrepareRestart();
+static unsigned sessionCount = 0;
+unsigned shiorikrkr::sessionGeneration() { return sessionCount; }
+void TVPClearScnearioCache();            // krkr2's KAGParser (sic)
+void TVPShioriKAGExClearScenarioCache(); // KAGParserEx's, under Shiori's name
 static double profileFrameWait = 0; // seconds frame() waited for the GPU since the last profile line
 extern double TVPShioriRenderSeconds;
 extern double TVPShioriImageLoadSeconds;
@@ -286,6 +290,10 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
     _argv = h.argv.data();
 
     TVPShioriPrepareRestart(); // a game played before in this process
+    ++sessionCount;
+    // Scenarios parsed for the last game (cached by name) are not this one's.
+    TVPClearScnearioCache();
+    TVPShioriKAGExClearScenarioCache();
     TVPTerminated = false;
     if (!::Application) ::Application = new tTVPApplication();
     bool ok = false;
@@ -609,9 +617,16 @@ SHIORIKRKR_EXPORT void shiorikrkr_stop(void) {
         hostLog("ShioriKrkr: shutdown threw");
     }
     // Messages the game's objects posted and never saw delivered hold pointers to them.
-    if (::Application)
+    if (::Application) {
         ::Application->FilterUserMessage(
             [](std::vector<std::tuple<void *, int, tTVPApplication::tMsg>> &messages) { messages.clear(); });
+        // The next game gets its own application object (its terminate flag, title and
+        // image loading thread are this game's).
+        delete ::Application;
+        ::Application = nullptr;
+    }
+    if (const int left = shiori::forgetWindowLayers())
+        hostLog("ShioriKrkr: " + std::to_string(left) + " window(s) left after shutdown");
     shiori::audioShutdown();
     shiorikrkr::setEmoteHost(nullptr);
     shiori::cursorChanged = nullptr;

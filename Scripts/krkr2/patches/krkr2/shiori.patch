@@ -1,3 +1,34 @@
+diff --git a/cpp/core/base/EventIntf.cpp b/cpp/core/base/EventIntf.cpp
+index a172e1d..7e9f929 100644
+--- a/cpp/core/base/EventIntf.cpp
++++ b/cpp/core/base/EventIntf.cpp
+@@ -747,6 +747,26 @@ bool TVPProcessContinuousHandlerEventFlag = false;
+ static std::vector<tTVPContinuousEventCallbackIntf *> TVPContinuousEventVector;
+ static std::vector<tTJSVariantClosure> TVPContinuousHandlerVector;
+ static bool TVPContinuousEventProcessing = false;
++#ifdef SHIORIKRKR
++// Shiori: the next game in the process starts with empty event queues and the flags as at
++// start-up. What is left belongs to objects of the last game's script engine, which may never
++// have been freed: forgotten, not delivered or deleted.
++void TVPShioriResetEvents() {
++    TVPInputEventQueue.clear();
++    TVPEventQueue.clear();
++    TVPWinUpdateEventQueue.clear();
++    TVPExclusiveEventPosted = false;
++    TVPEventSequenceNumber = 0;
++    TVPEventSequenceNumberToProcess = 0;
++    TVPEventDisabled = false;
++    TVPEventInterrupting = false;
++    TVPWindowUpdateEventsDelivering = false;
++    TVPProcessContinuousHandlerEventFlag = false;
++    TVPContinuousEventVector.clear();
++    TVPContinuousHandlerVector.clear();
++    TVPContinuousEventProcessing = false;
++}
++#endif
+ 
+ static void TVPDestroyContinuousHandlerVector() {
+     std::vector<tTJSVariantClosure>::iterator i;
 diff --git a/cpp/core/base/ScriptMgnIntf.cpp b/cpp/core/base/ScriptMgnIntf.cpp
 index 757f829..7d70232 100644
 --- a/cpp/core/base/ScriptMgnIntf.cpp
@@ -18,7 +49,7 @@ index 757f829..7d70232 100644
  // TVPRestartScriptEngine
  //---------------------------------------------------------------------------
 diff --git a/cpp/core/base/StorageIntf.cpp b/cpp/core/base/StorageIntf.cpp
-index e0f1f66..94a22fe 100644
+index e0f1f66..270f404 100644
 --- a/cpp/core/base/StorageIntf.cpp
 +++ b/cpp/core/base/StorageIntf.cpp
 @@ -552,6 +552,12 @@ void TVPGetLocalName(ttstr &name) {
@@ -34,8 +65,22 @@ index e0f1f66..94a22fe 100644
      if(TJS_strchr(name.c_str(), TVPArchiveDelimiter))
          return TJS_W("");
      // in-archive storage is always not accessible from local file
+@@ -902,6 +908,13 @@ static void TVPClearAutoPathCache() {
+     TVPAutoPathTable.Clear();
+     AutoPathTableInit = false;
+ }
++#ifdef SHIORIKRKR
++// Shiori: a later game in the process starts with no auto paths (not the last game's folders).
++void TVPShioriResetAutoPaths() {
++    TVPAutoPathList.clear();
++    TVPClearAutoPathCache();
++}
++#endif
+ 
+ //---------------------------------------------------------------------------
+ struct tTVPClearAutoPathCacheCallback : public tTVPCompactEventCallbackIntf {
 diff --git a/cpp/core/base/SysInitIntf.cpp b/cpp/core/base/SysInitIntf.cpp
-index da49809..691898e 100644
+index da49809..83caf5b 100644
 --- a/cpp/core/base/SysInitIntf.cpp
 +++ b/cpp/core/base/SysInitIntf.cpp
 @@ -63,21 +63,30 @@ static void TVPCauseAtExit();
@@ -69,7 +114,7 @@ index da49809..691898e 100644
      TVPAfterSystemUninit();
  
      TVPCauseAtExit();
-@@ -132,9 +141,39 @@ static void TVPCauseAtExit() {
+@@ -132,9 +141,53 @@ static void TVPCauseAtExit() {
                TVPAtExitInfos->end()); // descending sort
  
      for(auto i = TVPAtExitInfos->begin(); i != TVPAtExitInfos->end(); ++i) {
@@ -97,6 +142,13 @@ index da49809..691898e 100644
 +extern bool TVPTransHandlerProviderInit;
 +extern void TVPShioriResetPlugins();
 +extern void TVPShioriResetArchiveHandleCache();
++extern void TVPShioriResetProgramArguments();
++extern void TVPShioriResetAppTitle();
++extern void TVPShioriResetFontNames();
++extern void TVPShioriResetAppPath();
++extern void TVPShioriResetAutoPaths();
++extern void TVPShioriForgetWindows();
++extern void TVPShioriResetEvents();
 +void TVPShioriPrepareRestart() {
 +    if(!TVPSystemUninitCalled)
 +        return;
@@ -106,6 +158,13 @@ index da49809..691898e 100644
 +    TVPTransHandlerProviderInit = true;
 +    TVPShioriResetPlugins();
 +    TVPShioriResetArchiveHandleCache();
++    TVPShioriResetProgramArguments();
++    TVPShioriResetAppTitle();
++    TVPShioriResetFontNames();
++    TVPShioriResetAppPath();
++    TVPShioriResetAutoPaths();
++    TVPShioriForgetWindows();
++    TVPShioriResetEvents();
 +}
 +#endif
  //---------------------------------------------------------------------------
@@ -399,7 +458,7 @@ index 8b6c0e7..34f38f1 100644
      ttstr GetName(tjs_uint idx) override { return ItemVector[idx].Name; }
  
 diff --git a/cpp/core/base/impl/StorageImpl.cpp b/cpp/core/base/impl/StorageImpl.cpp
-index 966d7b9..5a3570a 100644
+index 966d7b9..c36d2c3 100644
 --- a/cpp/core/base/impl/StorageImpl.cpp
 +++ b/cpp/core/base/impl/StorageImpl.cpp
 @@ -14,7 +14,11 @@
@@ -414,6 +473,81 @@ index 966d7b9..5a3570a 100644
  
  #include "MsgIntf.h"
  
+@@ -496,8 +500,22 @@ bool TVPRemoveFolder(const ttstr &name) {
+ //---------------------------------------------------------------------------
+ // TVPGetAppPath
+ //---------------------------------------------------------------------------
++#ifdef SHIORIKRKR
++// Shiori: taken from the project folder on first use, as before, but again for each game in
++// the process (TVPShioriPrepareRestart).
++static bool TVPAppPathTaken = false;
++void TVPShioriResetAppPath() { TVPAppPathTaken = false; }
++#endif
+ ttstr TVPGetAppPath() {
++#ifdef SHIORIKRKR
++    static ttstr apppath;
++    if(!TVPAppPathTaken) {
++        TVPAppPathTaken = true;
++        apppath = TVPExtractStoragePath(TVPProjectDir);
++    }
++#else
+     static ttstr apppath(TVPExtractStoragePath(TVPProjectDir));
++#endif
+     return apppath;
+ }
+ //---------------------------------------------------------------------------
+diff --git a/cpp/core/base/impl/SysInitImpl.cpp b/cpp/core/base/impl/SysInitImpl.cpp
+index 9875592..9caba7f 100644
+--- a/cpp/core/base/impl/SysInitImpl.cpp
++++ b/cpp/core/base/impl/SysInitImpl.cpp
+@@ -458,6 +458,15 @@ static bool TVPProgramArgumentsInit = false;
+ static tjs_int TVPCommandLineArgumentGeneration = 0;
+ static bool TVPDataPathDirectoryEnsured = false;
+ 
++#ifdef SHIORIKRKR
++// Shiori: a later game in the process reads its own arguments and data path (its saves).
++void TVPShioriResetProgramArguments() {
++    TVPProgramArgumentsInit = false;
++    TVPDataPathDirectoryEnsured = false;
++    TVPProgramArguments.clear();
++}
++#endif
++
+ //---------------------------------------------------------------------------
+ tjs_int TVPGetCommandLineArgumentGeneration() {
+     return TVPCommandLineArgumentGeneration;
+diff --git a/cpp/core/base/impl/SystemImpl.cpp b/cpp/core/base/impl/SystemImpl.cpp
+index 256c70e..927621f 100644
+--- a/cpp/core/base/impl/SystemImpl.cpp
++++ b/cpp/core/base/impl/SystemImpl.cpp
+@@ -44,6 +44,13 @@
+ //---------------------------------------------------------------------------
+ static ttstr TVPAppTitle;
+ static bool TVPAppTitleInit = false;
++#ifdef SHIORIKRKR
++// Shiori: a later game in the process has its own title.
++void TVPShioriResetAppTitle() {
++    TVPAppTitleInit = false;
++    TVPAppTitle.Clear();
++}
++#endif
+ //---------------------------------------------------------------------------
+ 
+ bool TVPGetKeyMouseAsyncState(tjs_uint keycode, bool getcurrent);
+@@ -928,8 +935,13 @@ TJS_DENY_NATIVE_PROP_SETTER
+ TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, dataPath)
+ //----------------------------------------------------------------------
+ TJS_BEGIN_NATIVE_PROP_DECL(exeName){ TJS_BEGIN_NATIVE_PROP_GETTER{
++#ifdef SHIORIKRKR
++    // Shiori: the current game's (a later game in the process has its own).
++    *result = TVPNormalizeStorageName(ExePath());
++#else
+     static ttstr exename(TVPNormalizeStorageName(ExePath()));
+ *result = exename;
++#endif
+ return TJS_S_OK;
+ }
+ TJS_END_NATIVE_PROP_GETTER
 diff --git a/cpp/core/environ/win32/TVPWindow.h b/cpp/core/environ/win32/TVPWindow.h
 index f1f07ee..9769d25 100644
 --- a/cpp/core/environ/win32/TVPWindow.h
@@ -628,6 +762,20 @@ index f71ba61..283d990 100644
  
      if(_this->RegEx) {
          onig_free(_this->RegEx);
+diff --git a/cpp/core/utils/DebugIntf.cpp b/cpp/core/utils/DebugIntf.cpp
+index bc52222..11da6f6 100644
+--- a/cpp/core/utils/DebugIntf.cpp
++++ b/cpp/core/utils/DebugIntf.cpp
+@@ -69,6 +69,9 @@ static void TVPDestroyLogObjects() {
+         delete TVPLogDeque, TVPLogDeque = nullptr;
+     if(TVPImportantLogs)
+         delete TVPImportantLogs, TVPImportantLogs = nullptr;
++#ifdef SHIORIKRKR
++    TVPLogObjectsInitialized = false; // Shiori: a later game in the process logs again
++#endif
+ }
+ 
+ //---------------------------------------------------------------------------
 diff --git a/cpp/core/utils/win32/ThreadImpl.cpp b/cpp/core/utils/win32/ThreadImpl.cpp
 index afc1493..82c3759 100644
 --- a/cpp/core/utils/win32/ThreadImpl.cpp
@@ -746,7 +894,7 @@ index 10850e9..2ea7786 100644
  public:
      void Set();
 diff --git a/cpp/core/visual/FontImpl.cpp b/cpp/core/visual/FontImpl.cpp
-index 514308b..1c3ea09 100644
+index 514308b..dd64939 100644
 --- a/cpp/core/visual/FontImpl.cpp
 +++ b/cpp/core/visual/FontImpl.cpp
 @@ -15,7 +15,9 @@
@@ -759,7 +907,25 @@ index 514308b..1c3ea09 100644
  #include "StorageImpl.h"
  #include "BinaryStream.h"
  
-@@ -218,6 +220,7 @@ void TVPInitFontNames() {
+@@ -175,8 +177,16 @@ extern std::vector<ttstr> Android_GetExternalStoragePath();
+ extern ttstr Android_GetInternalStoragePath();
+ extern ttstr Android_GetApkStoragePath();
+ #endif
++static bool TVPFontNamesInit = false;
++#ifdef SHIORIKRKR
++// Shiori: the fonts a game listed or added (from its own folder and archives) are its own;
++// a later game in the process lists afresh.
++void TVPShioriResetFontNames() {
++    TVPFontNames.Clear();
++    TVPFontNamesInit = false;
++}
++#endif
+ void TVPInitFontNames() {
+-    static bool TVPFontNamesInit = false;
+     // enumlate all fonts
+     if(TVPFontNamesInit)
+         return;
+@@ -218,6 +228,7 @@ void TVPInitFontNames() {
              break;
  #endif
  
@@ -767,7 +933,7 @@ index 514308b..1c3ea09 100644
          { // from internal storage
              auto data = cocos2d::FileUtils::getInstance()->getDataFromFile(
                  "NotoSansCJK-Regular.ttc");
-@@ -238,6 +241,7 @@ void TVPInitFontNames() {
+@@ -238,6 +249,7 @@ void TVPInitFontNames() {
                     }))
                  break;
          }
@@ -857,7 +1023,7 @@ index 5feb515..cd7cb90 100644
          for(int i = 0; i < textures.size(); ++i) {
              textures[i].first->GetScanLineForRead(
 diff --git a/cpp/core/visual/TransIntf.cpp b/cpp/core/visual/TransIntf.cpp
-index 08e41a6..e3cd07e 100644
+index 08e41a6..f8b6a9d 100644
 --- a/cpp/core/visual/TransIntf.cpp
 +++ b/cpp/core/visual/TransIntf.cpp
 @@ -222,7 +222,7 @@ tjs_error tTVPScanLineProviderForBaseBitmap::GetHeight(/*in*/ tjs_int *height) {
@@ -869,6 +1035,26 @@ index 08e41a6..e3cd07e 100644
  //---------------------------------------------------------------------------
  tjs_error
  	tTVPScanLineProviderForBaseBitmap::GetPixelFormat(/*out*/tjs_int *bpp)
+@@ -817,8 +817,19 @@ public:
+ 
+         iTVPScanLineProvider *scpro;
+         er = imagepro->LoadImage(rulename, 8, 0x02ffffff, src1w, src1h, &scpro);
++#ifdef SHIORIKRKR
++        // Shiori: a rule the game names but doesn't ship (NEKOPARA Vol. 0's 時計) becomes a
++        // crossfade of the same length, logged, rather than a fatal error.
++        if(TJS_FAILED(er)) {
++            TVPAddImportantLog(TVPFormatMessage(TVPCannotLoadRuleGraphic, rulename) +
++                               TJS_W(" (crossfade instead)"));
++            return (iTVPBaseTransHandler *)(new tTVPCrossFadeTransHandler(
++                options, layertype, time));
++        }
++#else
+         if(TJS_FAILED(er))
+             TVPThrowExceptionMessage(TVPCannotLoadRuleGraphic, rulename);
++#endif
+ 
+         // create a transition object
+         iTVPBaseTransHandler *ret;
 diff --git a/cpp/core/visual/TransIntf.h b/cpp/core/visual/TransIntf.h
 index 70d2014..9603619 100644
 --- a/cpp/core/visual/TransIntf.h
@@ -892,6 +1078,25 @@ index 70d2014..9603619 100644
  #endif
      iTVPTexture2D *GetTexture() override;
      iTVPTexture2D *GetTextureForRender() override;
+diff --git a/cpp/core/visual/WindowIntf.cpp b/cpp/core/visual/WindowIntf.cpp
+index e31de62..137a1a2 100644
+--- a/cpp/core/visual/WindowIntf.cpp
++++ b/cpp/core/visual/WindowIntf.cpp
+@@ -32,6 +32,14 @@
+ //---------------------------------------------------------------------------
+ tTJSNI_Window *TVPMainWindow = nullptr; // main window
+ static std::vector<tTJSNI_Window *> TVPWindowVector;
++#ifdef SHIORIKRKR
++// Shiori: windows a game's shutdown left registered belong to a script engine that is gone; the
++// next game in the process starts with none (its first window is the main one).
++void TVPShioriForgetWindows() {
++    TVPWindowVector.clear();
++    TVPMainWindow = nullptr;
++}
++#endif
+ //---------------------------------------------------------------------------
+ static void TVPRegisterWindowToList(tTJSNI_Window *window) {
+     if(TVPMainWindow == nullptr && TVPWindowVector.size() == 0) {
 diff --git a/cpp/core/visual/impl/LayerBitmapImpl.cpp b/cpp/core/visual/impl/LayerBitmapImpl.cpp
 index 31858aa..5b58d32 100644
 --- a/cpp/core/visual/impl/LayerBitmapImpl.cpp
@@ -963,6 +1168,32 @@ index 85ec256..d7b3222 100644
  	virtual tjs_error GetPixelFormat(/*out*/tjs_int *bpp) = 0;
  		// return image bit depth
  	virtual tjs_error GetPitchBytes(/*out*/tjs_int *pitch) = 0;
+diff --git a/cpp/plugins/LayerExBase.cpp b/cpp/plugins/LayerExBase.cpp
+index af56fa5..339f135 100644
+--- a/cpp/plugins/LayerExBase.cpp
++++ b/cpp/plugins/LayerExBase.cpp
+@@ -12,8 +12,8 @@ iTJSDispatch2 *NI_LayerExBase::_pitchProp = nullptr;
+ iTJSDispatch2 *NI_LayerExBase::_bufferProp = nullptr;
+ iTJSDispatch2 *NI_LayerExBase::_updateProp = nullptr;
+ 
++static bool inited = false;
+ void NI_LayerExBase::init(iTJSDispatch2 *layerobj) {
+-    static bool inited = false;
+     if(inited)
+         return;
+     inited = true;
+@@ -85,6 +85,11 @@ void NI_LayerExBase::unInit() {
+         _pitchProp->Release();
+     if(_updateProp)
+         _updateProp->Release();
++#ifdef SHIORIKRKR
++    // Shiori: the next game's Layer class is another object; look its properties up again.
++    _leftProp = _topProp = _widthProp = _heightProp = _bufferProp = _pitchProp = _updateProp = nullptr;
++    inited = false;
++#endif
+ }
+ 
+ tTVPAtExit _NI_LayerExBase_unInit(TVP_ATEXIT_PRI_PREPARE,
 diff --git a/cpp/plugins/windowEx.cpp b/cpp/plugins/windowEx.cpp
 index 7471472..4d7469b 100644
 --- a/cpp/plugins/windowEx.cpp

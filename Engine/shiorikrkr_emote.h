@@ -17,6 +17,9 @@ namespace shiorikrkr {
 
 // The host's E-mote player (shiorikrkr_config_t.emote), or NULL to draw no characters.
 void setEmoteHost(const shiorikrkr_emote_host_t *host);
+/// Counts games started in this process: script objects cached by Shiori's code belong to one
+/// game's script engine and are made again when this changes.
+unsigned sessionGeneration();
 const shiorikrkr_emote_host_t *emoteHost();
 
 namespace util {

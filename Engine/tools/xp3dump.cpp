@@ -2,15 +2,16 @@
  * If a copy of the MPL was not distributed with this file, You can obtain one at
  * https://mozilla.org/MPL/2.0/. */
 
-// Development tool: lists or extracts members of a game's XP3 archive the way ShioriKrkr reads
-// them (NEKO WORKs names and key, or a CxDec scheme), for reading a game's scripts while
-// working on the engine. Output goes where it's told (a scratch folder), never into the game.
+// Development tool: lists the members of a game's XP3 archive the way ShioriKrkr names them
+// (NEKO WORKs name chunks, or plain names), with their sizes. It never decrypts or writes a
+// member: game content stays in the archive (Shiori decrypts only in memory, while playing).
 //
-//   xp3dump <archive.xp3> <game folder> <out dir> [--scheme file.shcx] [name substring...]
+//   xp3dump <archive.xp3> [name substring...]
 #include "../nekoworks.h"
 #include "../cx_decrypt.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -81,30 +82,13 @@ struct Entry {
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc < 4) {
-        fprintf(stderr, "usage: xp3dump archive.xp3 gamefolder outdir [--scheme f] [filter...]\n");
+    if (argc < 2) {
+        fprintf(stderr, "usage: xp3dump archive.xp3 [filter...]\n");
         return 2;
     }
-    std::string archive = argv[1], root = argv[2], out = argv[3];
+    std::string archive = argv[1];
     std::vector<std::string> filters;
-    std::unique_ptr<shiorikrkr::CxDecryptor> cx;
-    for (int i = 4; i < argc; ++i) {
-        if (!strcmp(argv[i], "--scheme") && i + 1 < argc) {
-            shiorikrkr::CxScheme scheme;
-            std::string error;
-            if (!shiorikrkr::CxScheme::load(argv[++i], scheme, error)) {
-                fprintf(stderr, "scheme: %s\n", error.c_str());
-                return 1;
-            }
-            cx = std::make_unique<shiorikrkr::CxDecryptor>(scheme);
-        } else {
-            filters.push_back(argv[i]);
-        }
-    }
-    shiorikrkr::NekoWorksKey neko;
-    std::string log;
-    if (!cx) shiorikrkr::detectNekoWorksKey(root, neko, log);
-    if (!log.empty()) fprintf(stderr, "%s\n", log.c_str());
+    for (int i = 2; i < argc; ++i) filters.push_back(argv[i]);
 
     FILE *f = fopen(archive.c_str(), "rb");
     if (!f) return 1;
@@ -144,49 +128,24 @@ int main(int argc, char **argv) {
         p += 12 + size;
     }
     std::map<uint32_t, size_t> used;
-    mkdir(out.c_str(), 0755);
     for (Entry &e : entries) {
         auto named = names.find(e.hash);
         if (named != names.end()) {
             size_t &u = used[e.hash];
             e.name = named->second[std::min(u, named->second.size() - 1)];
             ++u;
-        } else if (!names.empty()) {
-            continue; // decoy
+        } else if (!names.empty() && !getenv("XP3_UNNAMED")) {
+            continue; // decoy (XP3_UNNAMED=1 lists them, marked)
         }
+        const bool unnamed = named == names.end() && !names.empty();
         bool match = filters.empty();
         for (const auto &flt : filters)
             if (e.name.find(flt) != std::string::npos) match = true;
         if (!match) continue;
-        std::vector<uint8_t> data;
-        for (const Segment &s : e.segments) {
-            std::vector<uint8_t> raw(s.arcSize);
-            fseeko(f, off_t(s.start), SEEK_SET);
-            fread(raw.data(), 1, raw.size(), f);
-            if (s.compressed) {
-                std::vector<uint8_t> plain(s.orgSize);
-                uLongf length = uLongf(plain.size());
-                uncompress(plain.data(), &length, raw.data(), uLong(raw.size()));
-                raw.swap(plain);
-            }
-            data.insert(data.end(), raw.begin(), raw.end());
-        }
-        if (e.flags) {
-            if (neko.valid) shiorikrkr::decodeNekoWorks(neko, e.hash, 0, data.data(), data.size());
-            else if (cx) cx->decrypt(e.hash, 0, data.data(), data.size());
-        }
-        std::string path = out + "/" + e.name;
-        for (size_t i = out.size() + 1; i < path.size(); ++i)
-            if (path[i] == '/') {
-                path[i] = 0;
-                mkdir(path.c_str(), 0755);
-                path[i] = '/';
-            }
-        if (FILE *o = fopen(path.c_str(), "wb")) {
-            fwrite(data.data(), 1, data.size(), o);
-            fclose(o);
-        }
-        printf("%s (%zu)\n", e.name.c_str(), data.size());
+        uint64_t size = 0;
+        for (const Segment &seg : e.segments) size += seg.orgSize;
+        printf("%s (%llu)%s%s\n", e.name.c_str(), (unsigned long long)size, e.flags ? " protected" : "",
+               unnamed ? " unnamed" : "");
     }
     fclose(f);
 }

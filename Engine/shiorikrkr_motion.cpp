@@ -231,7 +231,15 @@ public:
     // The layer to draw into, made (or resized to the owner) as needed.
     iTJSDispatch2 *layer() {
         if (!owner_) return nullptr;
-        static tTJSVariant prepare;
+        // A function of the current game's script engine, made again for each game (the last
+        // game's is left alone: its engine is gone).
+        static tTJSVariant *prepareFor = nullptr;
+        static unsigned preparedFor = 0;
+        if (!prepareFor || preparedFor != shiorikrkr::sessionGeneration()) {
+            preparedFor = shiorikrkr::sessionGeneration();
+            prepareFor = new tTJSVariant();
+        }
+        tTJSVariant &prepare = *prepareFor;
         if (prepare.Type() == tvtVoid) {
             TVPExecuteExpression(TJS_W("(function(owner, child) {"
                                        " if (child === void) {"

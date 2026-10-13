@@ -108,6 +108,9 @@ int main(int argc, char **argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     @autoreleasepool {
         std::string base, patch, work, exe = "game.exe", scheme, font;
+        // --next-base/--next-patch/--next-exe/--next-scheme: a different game as the second
+        // session (leaving the first and starting another in the same process, as the app does).
+        std::string nextBase, nextPatch, nextExe = "game.exe", nextScheme;
         int frames = 600;
         bool present = false;
         int sessions = 1; // --again: leave the game and start it again in the same process
@@ -129,6 +132,10 @@ int main(int argc, char **argv) {
             else if (a == "--font") font = next();
             else if (a == "--present") present = true;
             else if (a == "--again") sessions = 2;
+            else if (a == "--next-base") nextBase = next(), sessions = 2;
+            else if (a == "--next-patch") nextPatch = next();
+            else if (a == "--next-exe") nextExe = next();
+            else if (a == "--next-scheme") nextScheme = next();
             else if (a == "--frames") frames = std::atoi(next().c_str());
             else if (a == "--click") {
                 auto [frame, rest] = split(next());
@@ -152,6 +159,7 @@ int main(int argc, char **argv) {
 
         NSFileManager *fm = NSFileManager.defaultManager;
         NSString *root = [NSString stringWithUTF8String:(work + "/game").c_str()];
+        auto prepareRoot = [&]() {
         [fm removeItemAtPath:root error:nil];
         [fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
         link([NSString stringWithUTF8String:base.c_str()], root, fm);
@@ -164,6 +172,8 @@ int main(int argc, char **argv) {
         NSString *saves = [NSString stringWithUTF8String:(work + "/saves").c_str()];
         [fm createDirectoryAtPath:saves withIntermediateDirectories:YES attributes:nil error:nil];
         [fm createSymbolicLinkAtPath:[root stringByAppendingPathComponent:@"savedata"] withDestinationPath:saves error:nil];
+        };
+        prepareRoot();
 
         std::vector<const char *> optionPointers;
         for (auto &o : options) optionPointers.push_back(o.c_str());
@@ -195,6 +205,22 @@ int main(int argc, char **argv) {
         }
 
         for (int session = 0; session < sessions; ++session) {
+        if (session == 1 && !nextBase.empty()) {
+            base = nextBase;
+            patch = nextPatch;
+            exe = nextExe;
+            scheme = nextScheme;
+            work += "/next";
+            root = [NSString stringWithUTF8String:(work + "/game").c_str()];
+            [fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
+            prepareRoot();
+            config.exe_name = exe.c_str();
+            config.cx_scheme_path = scheme.empty() ? nullptr : scheme.c_str();
+            static std::string nextRoot;
+            nextRoot = root.UTF8String;
+            config.game_root = nextRoot.c_str();
+            std::printf("== next game: %s (%s)\n", base.c_str(), exe.c_str());
+        }
         const auto started = std::chrono::steady_clock::now();
         const int status = shiorikrkr_start(&config);
         std::printf("== start: %d (%.2f s)\n", status,

@@ -41,10 +41,8 @@
 
 #include "KAGParserEx.cpp"
 
+// Once for each game (its script engine), when the game links KAGParserEx.dll.
 void shioriLinkKAGParserEx() {
-    static bool linked = false;
-    if (linked) return;
-    linked = true;
     tTJSNI_KAGParser::initMethod();
     iTJSDispatch2 *global = TVPGetScriptDispatch();
     if (!global) return;

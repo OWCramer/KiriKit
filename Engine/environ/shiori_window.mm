@@ -399,6 +399,15 @@ shiori::WindowLayer *shiori::mainWindowLayer() {
     return nullptr;
 }
 
+int shiori::forgetWindowLayers() {
+    auto &list = windows();
+    const int left = int(list.size());
+    for (ShioriWindowLayer *w : list) w->Instance = nullptr; // never deleted: nothing refers to them now
+    list.clear();
+    current = nullptr;
+    return left;
+}
+
 shiori::WindowLayer *shiori::activeWindowLayer() {
     // A modal window over the main one is what shows.
     if (current && current->Instance && current->Visible && current->Texture) return current;
