@@ -587,10 +587,23 @@ index f1f07ee..9769d25 100644
      void DisableAttentionPoint() {}
      static void GetVideoOffset(tjs_int &ofsx, tjs_int &ofsy) {
 diff --git a/cpp/core/plugin/PluginImpl.cpp b/cpp/core/plugin/PluginImpl.cpp
-index 601cab8..32e7c8c 100644
+index 601cab8..4e77cc4 100644
 --- a/cpp/core/plugin/PluginImpl.cpp
 +++ b/cpp/core/plugin/PluginImpl.cpp
-@@ -91,8 +91,21 @@ static void TVPSearchPluginsAt(std::vector<tTVPFoundPlugin> &list,
+@@ -52,7 +52,12 @@ void TVPLoadPlugin(const ttstr &name) {
+         pluginName = "motionplayer.dll";
+ 
+     if(TVPLoadInternalPlugin(pluginName)) {
++#ifdef SHIORIKRKR
++        // Shiori: every plug-in a game links, in its log (which closed DLLs a game needs).
++        spdlog::info("Loading Plugin: {} Success", name.AsStdString());
++#else
+         spdlog::debug("Loading Plugin: {} Success", name.AsStdString());
++#endif
+     } else {
+         spdlog::error("Loading Plugin: {} Failed", name.AsStdString());
+     }
+@@ -91,8 +96,21 @@ static void TVPSearchPluginsAt(std::vector<tTVPFoundPlugin> &list,
      });
  }
  

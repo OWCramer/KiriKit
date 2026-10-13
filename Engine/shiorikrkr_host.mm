@@ -175,6 +175,23 @@ int evaluate(const std::string &expression, std::string &text) {
         // Development aid: "#strings:<storage>" lists the identifiers in a compiled (TJS2
         // bytecode) script's string table, to see which members a script uses.
         // "#seq:<storage>" lists them in the order they're stored.
+        // "#ascii:<storage>" lists the ASCII words in any storage (a PSB scenario's names).
+        if (expression.rfind("#ascii:", 0) == 0) {
+            std::unique_ptr<tTJSBinaryStream> stream(
+                TVPCreateBinaryStreamForRead(ttstr(expression.substr(7).c_str()), TJS_W("")));
+            std::vector<uint8_t> bytes(size_t(stream->GetSize()));
+            if (!bytes.empty()) stream->ReadBuffer(bytes.data(), tjs_uint(bytes.size()));
+            std::set<std::string> found;
+            std::string run;
+            for (size_t i = 0; i <= bytes.size(); ++i) {
+                const uint8_t c = i < bytes.size() ? bytes[i] : 0;
+                if (c >= 0x21 && c < 0x7f) { run += char(c); continue; }
+                if (run.size() >= 3) found.insert(run);
+                run.clear();
+            }
+            for (const auto &s : found) text += s + " ";
+            return 0;
+        }
         const bool sequence = expression.rfind("#seq:", 0) == 0;
         if (sequence || expression.rfind("#strings:", 0) == 0) {
             std::unique_ptr<tTJSBinaryStream> stream(
