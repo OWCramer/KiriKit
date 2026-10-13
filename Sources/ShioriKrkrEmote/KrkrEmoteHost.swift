@@ -298,11 +298,11 @@ public final class KrkrEmoteHost {
     /// Models drawn lately, and when: their textures stay on the GPU. With more characters on
     /// screen than the texture cache held (six), every frame uploaded some again and waited for
     /// it (NEKOPARA with seven cats on screen ran at about 20 fps).
-    private var lastDrawn: [ObjectIdentifier: CFTimeInterval] = [:]
+    private var lastDrawn: [UInt64: CFTimeInterval] = [:]
 
     private func keepTextures(for p: KrkrEmotePlayer, gpu: EmoteGPU) {
         let now = CACurrentMediaTime()
-        for model in p.models { lastDrawn[ObjectIdentifier(model)] = now }
+        for model in p.models { lastDrawn[model.identity] = now }
         lastDrawn = lastDrawn.filter { now - $0.value < 2 }
         gpu.textureLimit = max(6, lastDrawn.count + 2)
     }
