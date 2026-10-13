@@ -458,7 +458,7 @@ index 8b6c0e7..34f38f1 100644
      ttstr GetName(tjs_uint idx) override { return ItemVector[idx].Name; }
  
 diff --git a/cpp/core/base/impl/StorageImpl.cpp b/cpp/core/base/impl/StorageImpl.cpp
-index 966d7b9..c36d2c3 100644
+index 966d7b9..a2c3186 100644
 --- a/cpp/core/base/impl/StorageImpl.cpp
 +++ b/cpp/core/base/impl/StorageImpl.cpp
 @@ -14,7 +14,11 @@
@@ -473,7 +473,29 @@ index 966d7b9..c36d2c3 100644
  
  #include "MsgIntf.h"
  
-@@ -496,8 +500,22 @@ bool TVPRemoveFolder(const ttstr &name) {
+@@ -342,8 +346,21 @@ void tTVPFileMedia::GetLocallyAccessibleName(ttstr &name) {
+     {
+         std::string prefix = "/";
+         prefix += tTJSNarrowStringHolder(ptr).Buf;
++#ifdef SHIORIKRKR
++        // Shiori: the current game's folders, asked each time. Taken once, they stayed the first
++        // game's; the next game's paths were then rebuilt from "/" with readdir, which the
++        // sandbox refuses above the app's container, leaving them lower-cased: on the phone's
++        // case-sensitive volume nothing was found ("Cannot find storage startup.tjs").
++        std::vector<ttstr> prefixPath;
++        std::vector<std::string> homeDir;
++        for(const std::string &path : TVPGetApplicationHomeDirectory()) {
++            prefixPath.emplace_back(path);
++            homeDir.emplace_back(path + "/");
++        }
++#else
+         static const std::vector<ttstr> &prefixPath = _getPrefixPath();
+         static const std::vector<std::string> &homeDir = _getHomeDir();
++#endif
+         for(int i = 0; i < prefixPath.size(); ++i) {
+             const std::string &dir = homeDir[i];
+             if(prefix.length() < dir.length())
+@@ -496,8 +513,22 @@ bool TVPRemoveFolder(const ttstr &name) {
  //---------------------------------------------------------------------------
  // TVPGetAppPath
  //---------------------------------------------------------------------------
