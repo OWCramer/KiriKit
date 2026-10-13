@@ -340,6 +340,16 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
         const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - tickStart).count();
         profileTick += took;
         profileWorst = std::max(profileWorst, took);
+        // A tick long enough to drop a frame: what it spent its time on.
+        static double lastEmote = 0, lastRender = 0;
+        if (took > 0.020) {
+            char line[200];
+            snprintf(line, sizeof line, "ShioriKrkr slow tick: %.1f ms (E-mote %.1f ms, software layer ops %.1f ms)", took * 1000,
+                     (ShioriEmoteDrawSeconds - lastEmote) * 1000, (TVPShioriRenderSeconds - lastRender) * 1000);
+            hostLog(line);
+        }
+        lastEmote = ShioriEmoteDrawSeconds;
+        lastRender = TVPShioriRenderSeconds;
         if (++profileTicks == 300) {
             char line[256];
             snprintf(line, sizeof line,
@@ -356,6 +366,7 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
             TVPShioriRenderSeconds = 0;
             TVPShioriRenderCalls = 0;
             ShioriEmoteDrawSeconds = 0;
+            lastEmote = lastRender = 0;
         }
     }
     if (shiori::exitRequested() || ::Application->IsTarminate()) h.finished = true;

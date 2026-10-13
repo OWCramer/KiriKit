@@ -139,6 +139,8 @@ public:
         state_ = default_;
         fontChanged();
     }
+    // The style back to the defaults (as resetFont: font, colours, decoration are one state).
+    void resetStyle() { resetFont(); }
 
     // render(text, autoIndent, diff (ms a character), all (ms for everything, 0: by diff), same)
     bool render(tTJSVariant textValue, tjs_int autoIndent, tjs_int diff, tjs_int all, tTJSVariant) {
@@ -213,6 +215,8 @@ public:
     }
 
     tjs_int getRenderCount() const { return tjs_int(chars_.size()); }
+    // Whether the last render ran past the box's height.
+    bool getRenderOver() const { return overflow_; }
 
     // The rendered text as plain text, lines joined with \n (for the backlog).
     tTJSVariant getRenderText() const {
@@ -817,6 +821,8 @@ NCB_REGISTER_CLASS_DIFFER(TextRenderBase, ShioriTextRender) {
     NCB_METHOD(done);
     NCB_METHOD(newline);
     NCB_METHOD(resetFont);
+    NCB_METHOD(resetStyle);
+    NCB_PROPERTY_RO(renderOver, getRenderOver);
     NCB_METHOD(calcShowCount);
     NCB_METHOD(getKeyWait);
     NCB_PROPERTY_RO(renderCount, getRenderCount);
