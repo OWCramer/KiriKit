@@ -52,6 +52,7 @@ extern int _argc;
 extern char **_argv;
 extern bool TVPTerminated;
 void TVPShioriPrepareRestart();
+void ShioriPrefetchReset();
 static unsigned sessionCount = 0;
 unsigned shiorikrkr::sessionGeneration() { return sessionCount; }
 
@@ -61,6 +62,8 @@ static double profileFrameWait = 0; // seconds frame() waited for the GPU since 
 extern double TVPShioriRenderSeconds;
 extern double TVPShioriImageLoadSeconds;
 double ShioriEmoteLoadSeconds = 0;
+extern double ShioriPSBLoadSeconds;
+extern double TVPShioriEventSeconds, TVPShioriContinuousSeconds, TVPShioriUpdateSeconds;
 extern unsigned TVPShioriRenderCalls;
 double ShioriEmoteDrawSeconds = 0;
 
@@ -340,6 +343,7 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
     _argv = h.argv.data();
 
     TVPShioriPrepareRestart(); // a game played before in this process
+    ShioriPrefetchReset();
     ++sessionCount;
     // Scenarios parsed for the last game (cached by name) are not this one's.
     TVPClearScnearioCache();
@@ -409,22 +413,32 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
         profileTick += took;
         profileWorst = std::max(profileWorst, took);
         // A tick long enough to drop a frame: what it spent its time on.
-        static double lastEmote = 0, lastRender = 0, lastImages = 0, lastModels = 0;
+        static double lastEmote = 0, lastRender = 0, lastImages = 0, lastModels = 0, lastPSB = 0, lastGPU = 0, lastEvents = 0, lastContinuous = 0, lastUpdate = 0;
         const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (took > 0.020 && now - lastSlowLine >= 1.0) { // at most a line a second
+        // Over a 60 Hz frame (16.7 ms); at most a line a second unless SHIORIKRKR_SLOW_ALL is set.
+        static const bool slowAll = getenv("SHIORIKRKR_SLOW_ALL") != nullptr;
+        if (took > 1.0 / 60 && (slowAll || now - lastSlowLine >= 1.0)) {
             lastSlowLine = now;
-            char line[240];
+            char line[420];
             snprintf(line, sizeof line,
                      "ShioriKrkr slow tick: %.1f ms (images loaded %.1f ms, E-mote models loaded %.1f ms, E-mote drawn %.1f ms, "
-                     "software layer ops %.1f ms)",
+                     "software layer ops %.1f ms, PSB files read %.1f ms, GPU waits %.1f ms; script events %.1f ms, "
+                     "continuous handlers %.1f ms, window updates %.1f ms)",
                      took * 1000, (TVPShioriImageLoadSeconds - lastImages) * 1000, (ShioriEmoteLoadSeconds - lastModels) * 1000,
-                     (ShioriEmoteDrawSeconds - lastEmote) * 1000, (TVPShioriRenderSeconds - lastRender) * 1000);
+                     (ShioriEmoteDrawSeconds - lastEmote) * 1000, (TVPShioriRenderSeconds - lastRender) * 1000, (ShioriPSBLoadSeconds - lastPSB) * 1000,
+                     (shiori::metal::gpuWaitSeconds() - lastGPU) * 1000, (TVPShioriEventSeconds - lastEvents) * 1000,
+                     (TVPShioriContinuousSeconds - lastContinuous) * 1000, (TVPShioriUpdateSeconds - lastUpdate) * 1000);
             hostLog(line);
         }
         lastEmote = ShioriEmoteDrawSeconds;
         lastRender = TVPShioriRenderSeconds;
         lastImages = TVPShioriImageLoadSeconds;
         lastModels = ShioriEmoteLoadSeconds;
+        lastPSB = ShioriPSBLoadSeconds;
+        lastGPU = shiori::metal::gpuWaitSeconds();
+        lastEvents = TVPShioriEventSeconds;
+        lastContinuous = TVPShioriContinuousSeconds;
+        lastUpdate = TVPShioriUpdateSeconds;
         if (++profileTicks == 600) {
             char line[256];
             snprintf(line, sizeof line,

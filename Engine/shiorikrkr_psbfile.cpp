@@ -22,12 +22,20 @@
 #include "MsgIntf.h"
 
 #include <zlib.h>
+#include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cstring>
 #include <map>
 #include <string>
 #include <vector>
 
 #define NCB_MODULE_NAME TJS_W("psbfile.dll")
+
+// Time spent reading PSB files (the host's slow-tick lines name it).
+double ShioriPSBLoadSeconds = 0;
+// Scenarios name the pictures their scenes load (shiori_prefetch.cpp decodes them ahead).
+void ShioriPrefetchNoteScenario(const ttstr &name, const uint8_t *bytes, size_t size);
 
 namespace {
 
@@ -297,6 +305,10 @@ public:
     }
 
     bool load(tTJSVariant source) {
+        struct Timer {
+            std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+            ~Timer() { ShioriPSBLoadSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(); }
+        } timer;
         std::vector<uint8_t> bytes;
         ttstr name;
         if (source.Type() == tvtOctet) {
@@ -308,6 +320,15 @@ public:
             std::unique_ptr<tTJSBinaryStream> stream(TVPCreateStream(TVPGetPlacedPath(name), TJS_BS_READ));
             bytes.resize(size_t(stream->GetSize()));
             if (!bytes.empty()) stream->ReadBuffer(bytes.data(), tjs_uint(bytes.size()));
+        }
+        if (source.Type() != tvtOctet) {
+            const std::string lower = [&] {
+                std::string n = name.AsStdString();
+                std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+                return n;
+            }();
+            if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".scn") == 0)
+                ShioriPrefetchNoteScenario(name, bytes.data(), bytes.size());
         }
         PSBReader reader(std::move(bytes));
         std::string error;

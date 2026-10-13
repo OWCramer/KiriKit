@@ -164,7 +164,7 @@ set(SHIORI_SOURCES "${HERE}/shiorikrkr_host.mm" "${HERE}/cx_decrypt.cpp" "${HERE
 set(SOURCES ${SHIORI_SOURCES} ${PARSERS} "${GEN}/tjsDateWordMap.inc" ${TJS2_SOURCES} ${BASE_SOURCES} ${VISUAL_SOURCES}
     ${SOUND_SOURCES} ${UTILS_SOURCES} ${OTHER_CORE_SOURCES} ${SHIORI_ENVIRON_SOURCES}
     ${KRKR2_PLUGIN_SOURCES} ${PLUGIN_SOURCES} "${HERE}/getlangname.cpp" "${HERE}/plugins/shiori_steam.cpp" "${HERE}/shiori_plugin_links.cpp"
-    "${HERE}/shiorikrkr_emote.cpp" "${HERE}/shiorikrkr_motion.cpp" "${HERE}/shiorikrkr_motionplayer.cpp" "${HERE}/shiorikrkr_psbfile.cpp" "${HERE}/datapack.cpp"
+    "${HERE}/shiorikrkr_emote.cpp" "${HERE}/shiorikrkr_motion.cpp" "${HERE}/shiorikrkr_motionplayer.cpp" "${HERE}/shiorikrkr_psbfile.cpp" "${HERE}/datapack.cpp" "${HERE}/shiori_prefetch.cpp"
     "${HERE}/plugins/shiori_textrender.cpp")
 
 option(SHIORIKRKR_DEBUG_THROW "Backtrace every C++ throw (SHIORIKRKR_TRACE_THROW=1)" OFF)

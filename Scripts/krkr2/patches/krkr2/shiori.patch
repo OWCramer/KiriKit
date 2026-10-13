@@ -1,8 +1,62 @@
 diff --git a/cpp/core/base/EventIntf.cpp b/cpp/core/base/EventIntf.cpp
-index a172e1d..7e9f929 100644
+index a172e1d..3514ac9 100644
 --- a/cpp/core/base/EventIntf.cpp
 +++ b/cpp/core/base/EventIntf.cpp
-@@ -747,6 +747,26 @@ bool TVPProcessContinuousHandlerEventFlag = false;
+@@ -12,6 +12,23 @@
+ #include "tjsCommHead.h"
+ 
+ #include <algorithm>
++#ifdef SHIORIKRKR
++#include <chrono>
++// Shiori: where a tick's time goes (the host's slow-tick lines): script events (input, timers,
++// triggers), continuous handlers (transitions, actions) and window updates (drawing).
++double TVPShioriEventSeconds = 0, TVPShioriContinuousSeconds = 0, TVPShioriUpdateSeconds = 0;
++namespace {
++struct tTVPShioriPhase {
++    double &Sum;
++    std::chrono::steady_clock::time_point Start = std::chrono::steady_clock::now();
++    explicit tTVPShioriPhase(double &sum) : Sum(sum) {}
++    ~tTVPShioriPhase() { Sum += std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count(); }
++};
++}
++#define SHIORI_PHASE(sum) tTVPShioriPhase shioriPhase(sum)
++#else
++#define SHIORI_PHASE(sum)
++#endif
+ #include "SysInitIntf.h"
+ #include "EventIntf.h"
+ #include "WindowIntf.h"
+@@ -499,6 +516,7 @@ void TVPDeliverAllEvents() {
+     TVPEventInterrupting = false;
+     try {
+         try {
++            SHIORI_PHASE(TVPShioriEventSeconds);
+             r = _TVPDeliverAllEvents();
+         }
+         TJS_CONVERT_TO_TJS_EXCEPTION
+@@ -516,6 +534,7 @@ void TVPDeliverAllEvents() {
+         try {
+             try {
+                 // process idle event queue
++                SHIORI_PHASE(TVPShioriEventSeconds);
+                 _TVPDeliverEventByPrio(TVP_EPT_IDLE);
+             }
+             TJS_CONVERT_TO_TJS_EXCEPTION
+@@ -531,11 +550,13 @@ void TVPDeliverAllEvents() {
+             // another thread. But I have no dought about that no one
+             // does care of missing one event in rare race condition.
+ 
++            SHIORI_PHASE(TVPShioriContinuousSeconds);
+             TVPDeliverContinuousEvent();
+         }
+         try {
+             try {
+                 // for window content updating
++                SHIORI_PHASE(TVPShioriUpdateSeconds);
+                 TVPDeliverWindowUpdateEvents();
+             }
+             TJS_CONVERT_TO_TJS_EXCEPTION
+@@ -747,6 +768,26 @@ bool TVPProcessContinuousHandlerEventFlag = false;
  static std::vector<tTVPContinuousEventCallbackIntf *> TVPContinuousEventVector;
  static std::vector<tTJSVariantClosure> TVPContinuousHandlerVector;
  static bool TVPContinuousEventProcessing = false;
@@ -1068,10 +1122,80 @@ index a096963..65bf0f1 100644
      // TVP_FACE_OPTIONS_NO_HINTING
      // TVP_FACE_OPTIONS_FORCE_AUTO_HINTING
 diff --git a/cpp/core/visual/GraphicsLoaderIntf.cpp b/cpp/core/visual/GraphicsLoaderIntf.cpp
-index 233fdd5..3ec914f 100644
+index 233fdd5..c3ea8de 100644
 --- a/cpp/core/visual/GraphicsLoaderIntf.cpp
 +++ b/cpp/core/visual/GraphicsLoaderIntf.cpp
-@@ -1875,9 +1875,24 @@ void TVPLoadGraphicProvince(tTVPBaseBitmap *dest, const ttstr &name,
+@@ -1872,14 +1872,111 @@ void TVPLoadGraphicProvince(tTVPBaseBitmap *dest, const ttstr &name,
+         data->Release();
+ }
+ 
++#ifdef SHIORIKRKR
++// Shiori: what its image prefetcher (shiori_prefetch.cpp) needs from here.
++// On the engine thread: the placed storage an image name loads from and its province image;
++// false when there is none, or the image has a mask (_m) image (those load as they always did).
++bool TVPShioriResolveGraphic(const ttstr &name, ttstr &placed, ttstr &province) {
++    try {
++        ttstr found(name), mask;
++        TVPFindGraphicLoadHandler(found, &mask, &province);
++        if(!mask.IsEmpty())
++            return false;
++        placed = TVPNormalizeStorageName(TVPGetPlacedPath(found));
++        return !placed.IsEmpty();
++    } catch(...) {
++        return false;
++    }
++}
++// On any thread: decodes a placed storage into a renderer texture, as TVPLoadGraphic does for
++// a plain image (no colour key, mask or size); nullptr when it can't.
++iTVPTexture2D *TVPShioriDecodeGraphic(const ttstr &placed, std::vector<tTVPGraphicMetaInfoPair> **meta) {
++    tTVPGraphicHandlerType *handler = TVPGetGraphicLoadHandler(TVPExtractStorageExt(placed));
++    if(!handler)
++        return nullptr;
++    tTVPLoadGraphicData data;
++    data.Dest = nullptr;
++    data.ColorKey = TVP_clNone;
++    data.Type = lgtFullColor;
++    data.Name = placed;
++    data.DesW = 0;
++    data.DesH = 0;
++    data.NeedMetaInfo = true;
++    data.MetaInfo = nullptr;
++    try {
++        tTVPStreamHolder holder(placed);
++        handler->Load(handler->FormatData, (void *)&data, TVPLoadGraphic_SizeCallback,
++                      TVPLoadGraphic_ScanLineCallback, TVPLoadGraphic_MetaInfoPushCallback,
++                      holder.Get(), -1, glmNormal);
++    } catch(...) {
++        if(data.Dest)
++            data.Dest->Release();
++        delete data.MetaInfo;
++        return nullptr;
++    }
++    if(!data.Dest) {
++        delete data.MetaInfo;
++        return nullptr;
++    }
++    iTVPTexture2D *texture = TVPGetRenderManager()->CreateTexture2D(data.Dest);
++    data.Dest->Release();
++    *meta = data.MetaInfo;
++    return texture;
++}
++// Whether the cache holds a plain load of this (normalized) storage.
++bool TVPShioriGraphicCached(const ttstr &nname) {
++    if(!TVPGraphicCacheEnabled)
++        return false;
++    tTVPGraphicsSearchData searchdata;
++    searchdata.Name = nname;
++    searchdata.KeyIdx = TVP_clNone;
++    searchdata.Mode = glmNormal;
++    searchdata.DesW = 0;
++    searchdata.DesH = 0;
++    return TVPGraphicCache.FindAndTouchWithHash(searchdata, tTVPGraphicCache::MakeHash(searchdata)) != nullptr;
++}
++extern void ShioriPrefetchUsed(const ttstr &nname);
++extern iTVPTexture2D *ShioriPrefetchTake(const ttstr &nname, std::vector<tTVPGraphicMetaInfoPair> **meta,
++                                         ttstr *province);
++#endif
  //---------------------------------------------------------------------------
  // TVPLoadGraphic (to texture), return size
  //---------------------------------------------------------------------------
@@ -1079,11 +1203,21 @@ index 233fdd5..3ec914f 100644
 +// Shiori: time spent loading images (the host's profile names slow ticks with it).
 +#include <chrono>
 +double TVPShioriImageLoadSeconds = 0;
++// SHIORIKRKR_TRACE_IMAGES=1 logs each load: name, cache hit or decoded, milliseconds.
++static bool TVPShioriTraceImages() {
++    static const bool on = getenv("SHIORIKRKR_TRACE_IMAGES") != nullptr;
++    return on;
++}
 +struct tTVPShioriLoadTimer {
 +    std::chrono::steady_clock::time_point Start = std::chrono::steady_clock::now();
++    const ttstr *Name = nullptr;
++    bool Hit = false;
 +    ~tTVPShioriLoadTimer() {
-+        TVPShioriImageLoadSeconds +=
-+            std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
++        const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
++        TVPShioriImageLoadSeconds += took;
++        if(Name && TVPShioriTraceImages())
++            TVPAddLog(ttstr(TJS_W("Shiori image: ")) + *Name + (Hit ? TJS_W(" cached ") : TJS_W(" decoded ")) +
++                      ttstr((tjs_int)(took * 10000)) + TJS_W(" x0.1ms"));
 +    }
 +};
 +#endif
@@ -1095,7 +1229,211 @@ index 233fdd5..3ec914f 100644
 +#endif
      // loading with cache management
      ttstr nname = TVPNormalizeStorageName(name);
++#ifdef SHIORIKRKR
++    shioriLoadTimer.Name = &nname;
++    // The scenario's next images start decoding off this thread.
++    ShioriPrefetchUsed(nname);
++#endif
      tjs_uint32 hash;
+     tTVPGraphicsSearchData searchdata;
+ 
+@@ -1896,6 +1993,9 @@ int TVPLoadGraphic(iTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
+             TVPGraphicCache.FindAndTouchWithHash(searchdata, hash);
+         if(ptr) {
+             // found in cache
++#ifdef SHIORIKRKR
++            shioriLoadTimer.Hit = true;
++#endif
+             if(dest)
+                 ptr->GetObjectNoAddRef()->AssignToTexture(dest);
+             if(provincename)
+@@ -1922,6 +2022,11 @@ int TVPLoadGraphic(iTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
+         tTVPBitmap *bmp = nullptr;
+         iTVPTexture2D *texture = nullptr;
+         if(mode == glmNormal && keyidx == TVP_clNone && !desw && !desh) {
++#ifdef SHIORIKRKR
++            // Decoded ahead by the prefetcher (or waited for when it is decoding it now).
++            texture = ShioriPrefetchTake(nname, &mi, &pn);
++            if(!texture)
++#endif
+             texture = TVPInternalLoadTexture(nname, &mi, &pn);
+         }
+         if(!texture) {
+@@ -2214,6 +2319,11 @@ void TVPTouchImages(const std::vector<ttstr> &storages, tjs_int64 limit,
+     // (univ.trans rule graphics nor province image may not work
+     // properly)
+ 
++#ifdef SHIORIKRKR
++    if(TVPShioriTraceImages())
++        TVPAddLog(ttstr(TJS_W("Shiori touchImages: ")) + ttstr((tjs_int)storages.size()) + TJS_W(" image(s), cache ") +
++                  ttstr((tjs_int)(TVPGraphicCacheLimit >> 20)) + TJS_W(" MB") + (TVPGraphicCacheEnabled ? TJS_W("") : TJS_W(" (off)")));
++#endif
+     if(!TVPGraphicCacheLimit || !TVPGraphicCacheEnabled)
+         return;
+ 
+diff --git a/cpp/core/visual/LoadTLG.cpp b/cpp/core/visual/LoadTLG.cpp
+index 7919e4e..e111dfa 100644
+--- a/cpp/core/visual/LoadTLG.cpp
++++ b/cpp/core/visual/LoadTLG.cpp
+@@ -17,6 +17,7 @@
+ #include "tjsDictionary.h"
+ 
+ #include <stdlib.h>
++#include <algorithm>
+ 
+ /*
+         TLG5:
+@@ -35,6 +36,134 @@
+                 (in Japanese).
+ */
+ 
++#ifdef SHIORIKRKR
++// Shiori: TLG5 in two stages at once. Its LZSS runs through the whole file in order (one
++// dictionary for every block and colour) and its colour composition needs the line above, so
++// neither splits, but they overlap: a thread decompresses block after block while this one
++// composes the blocks already done. The file is read in one go (an archive member read in
++// small pieces seeks for every one). Same pixels as the loop in TVPLoadTLG5; a 1526x1968
++// standing picture of Ninja Girl's went from 14.3 to 10.3 ms a load on a Mac.
++#include <condition_variable>
++#include <mutex>
++#include <thread>
++#include <vector>
++namespace {
++void ShioriLoadTLG5Pipelined(void *callbackdata, tTVPGraphicScanLineCallback scanlinecallback,
++                             tTJSBinaryStream *src, tjs_int colors, tjs_int width, tjs_int height,
++                             tjs_int blockheight, tjs_int blockcount) {
++    const tjs_uint64 remain = src->GetSize() - src->GetPosition();
++    std::vector<tjs_uint8> data(size_t(remain) + 16);
++    src->ReadBuffer(data.data(), tjs_uint(remain));
++    const size_t block = size_t(blockheight) * width;
++    const size_t plane = block * blockcount + 32;
++    std::vector<tjs_uint8> planes(plane * colors);
++    tjs_uint8 *outbuf[4];
++    for(tjs_int c = 0; c < colors; c++)
++        outbuf[c] = planes.data() + plane * c;
++
++    std::mutex mutex;
++    std::condition_variable cond;
++    tjs_int ready = 0;
++    bool failed = false;
++    std::thread producer([&] {
++        std::vector<tjs_uint8> textbuf(4096 + 64, 0);
++        tjs_uint8 *text = textbuf.data() + 16;
++        tjs_int r = 0;
++        size_t pos = 0;
++        for(tjs_int b = 0; b < blockcount; b++) {
++            for(tjs_int c = 0; c < colors; c++) {
++                if(pos + 5 > remain) {
++                    std::lock_guard<std::mutex> lock(mutex);
++                    failed = true;
++                    cond.notify_all();
++                    return;
++                }
++                const tjs_uint8 mark = data[pos];
++                const tjs_uint32 size = tjs_uint32(data[pos + 1]) | tjs_uint32(data[pos + 2]) << 8 |
++                    tjs_uint32(data[pos + 3]) << 16 | tjs_uint32(data[pos + 4]) << 24;
++                pos += 5;
++                if(pos + size > remain || (mark != 0 && size > block)) {
++                    std::lock_guard<std::mutex> lock(mutex);
++                    failed = true;
++                    cond.notify_all();
++                    return;
++                }
++                tjs_uint8 *dst = outbuf[c] + block * b;
++                if(mark == 0)
++                    r = TVPTLG5DecompressSlide(dst, data.data() + pos, tjs_int(size), text, r);
++                else
++                    memcpy(dst, data.data() + pos, size);
++                pos += size;
++            }
++            std::lock_guard<std::mutex> lock(mutex);
++            ready = b + 1;
++            cond.notify_all();
++        }
++    });
++
++    bool broken = false;
++    try {
++        tjs_uint8 *prevline = nullptr;
++        for(tjs_int b = 0; b < blockcount && !broken; b++) {
++            {
++                std::unique_lock<std::mutex> lock(mutex);
++                cond.wait(lock, [&] { return ready > b || failed; });
++                if(ready <= b) {
++                    broken = true;
++                    break;
++                }
++            }
++            const tjs_int y_blk = b * blockheight;
++            const tjs_int y_lim = std::min(y_blk + blockheight, height);
++            tjs_uint8 *outbufp[4];
++            for(tjs_int c = 0; c < colors; c++)
++                outbufp[c] = outbuf[c] + block * b;
++            for(tjs_int y = y_blk; y < y_lim; y++) {
++                tjs_uint8 *current = (tjs_uint8 *)scanlinecallback(callbackdata, y);
++                tjs_uint8 *current_org = current;
++                if(prevline) {
++                    if(colors == 3)
++                        TVPTLG5ComposeColors3To4(current, prevline, outbufp, width);
++                    else
++                        TVPTLG5ComposeColors4To4(current, prevline, outbufp, width);
++                } else if(colors == 3) {
++                    for(tjs_int pr = 0, pg = 0, pb = 0, x = 0; x < width; x++) {
++                        tjs_int r = outbufp[0][x], g = outbufp[1][x], b2 = outbufp[2][x];
++                        b2 += g;
++                        r += g;
++                        0 [current++] = pb += b2;
++                        0 [current++] = pg += g;
++                        0 [current++] = pr += r;
++                        0 [current++] = 0xff;
++                    }
++                } else {
++                    for(tjs_int pr = 0, pg = 0, pb = 0, pa = 0, x = 0; x < width; x++) {
++                        tjs_int r = outbufp[0][x], g = outbufp[1][x], b2 = outbufp[2][x], a = outbufp[3][x];
++                        b2 += g;
++                        r += g;
++                        0 [current++] = pb += b2;
++                        0 [current++] = pg += g;
++                        0 [current++] = pr += r;
++                        0 [current++] = pa += a;
++                    }
++                }
++                for(tjs_int c = 0; c < colors; c++)
++                    outbufp[c] += width;
++                scanlinecallback(callbackdata, -1);
++                prevline = current_org;
++            }
++        }
++    } catch(...) {
++        producer.join();
++        throw;
++    }
++    producer.join();
++    if(broken)
++        TVPThrowExceptionMessage(TVPTLGLoadError, TJS_W("broken TLG5 data"));
++}
++} // namespace
++#endif
++
+ //---------------------------------------------------------------------------
+ // TLG5 loading handler
+ //---------------------------------------------------------------------------
+@@ -68,6 +197,15 @@ void TVPLoadTLG5(void *formatdata, void *callbackdata,
+ 
+     // decomperss
+     sizecallback(callbackdata, width, height, colors == 3 ? gpfRGB : gpfRGBA);
++#ifdef SHIORIKRKR
++    static const bool shioriSerial5 = getenv("SHIORIKRKR_TLG_SERIAL") != nullptr;
++    if(!shioriSerial5 && blockcount >= 4 && tjs_int64(width) * height >= 256 * 1024 &&
++       src->GetSize() - src->GetPosition() < (tjs_uint64(256) << 20)) {
++        ShioriLoadTLG5Pipelined(callbackdata, scanlinecallback, src, colors, width, height, blockheight,
++                                blockcount);
++        return;
++    }
++#endif
+ 
+     tjs_uint8 *inbuf = nullptr;
+     tjs_uint8 *outbuf[4];
 diff --git a/cpp/core/visual/RenderManager.cpp b/cpp/core/visual/RenderManager.cpp
 index 5feb515..cd7cb90 100644
 --- a/cpp/core/visual/RenderManager.cpp
