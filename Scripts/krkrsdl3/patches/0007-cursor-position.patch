@@ -1,0 +1,37 @@
+diff --git a/plugins/windowEx.cpp b/plugins/windowEx.cpp
+index 6794c3f..6a8f1f2 100644
+--- a/plugins/windowEx.cpp
++++ b/plugins/windowEx.cpp
+@@ -3,6 +3,8 @@
+ #include "TVPScript.h"
+ #include "GraphicsLoadThread.h"
+ #include "tjsNativeWindow.h"
++#include "WindowManager.h"
++#include "TVPWindow.h"
+ #include "Platform.h"
+ 
+ // 搞一堆空函数就行了，没啥好实现的
+@@ -1129,6 +1131,23 @@ struct System
+                                                   tTJSVariant** p,
+                                                   iTJSDispatch2* obj)
+     {
++        // Shiori: the pointer in screen coordinates (the main window's left/top plus its
++        // pointer). Returning nothing broke games that read it on every move (WORLD END
++        // ECONOMiCA's menu bar check); the user's fix from Shiori's AetherKrkr patch 0029.
++        if (!r)
++            return TJS_S_OK;
++        tjs_int x = 0, y = 0;
++        if (TVPMainWindow)
++        {
++            TVPMainWindow->GetCursorPos(x, y);
++            x += TVPMainWindow->GetLeft();
++            y += TVPMainWindow->GetTop();
++        }
++        ncbDictionaryAccessor dict;
++        dict.SetValue(TJS_N("x"), x);
++        dict.SetValue(TJS_N("y"), y);
++        auto* dispatch = dict.GetDispatch();
++        r->SetObject(dispatch, dispatch);
+         return TJS_S_OK;
+     }
+     // System.setMouseCursorPos
