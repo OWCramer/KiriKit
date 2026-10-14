@@ -22,6 +22,7 @@
 
 #include "environ/shiori_environ.h"
 #include "cx_decrypt.h"
+#include "shiori_hx_link.h"
 #include "nekoworks.h"
 #include "cursor_decode.h"
 #include "shiorikrkr_emote.h"
@@ -303,6 +304,8 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
 
     TVPXP3FilterOnlyFlaggedMembers = false;
     TVPSetXP3ArchiveExtractionFilter(nullptr);
+    shiorikrkr::hxUninstall();
+    bool hasHx = false;
     if (config->cx_scheme_path && *config->cx_scheme_path) {
         shiorikrkr::CxScheme scheme;
         std::string error;
@@ -310,15 +313,25 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
             hostLog("ShioriKrkr: Cx scheme: " + error);
             return SHIORIKRKR_ERROR_SCHEME;
         }
-        h.cx = std::make_unique<shiorikrkr::CxDecryptor>(scheme);
-        TVPSetXP3ArchiveExtractionFilter(xp3Filter);
-        // Members the archive stores plainly (info flags 0) are read as they are, as GARbro does.
-        TVPXP3FilterOnlyFlaggedMembers = true;
-        hostLog("ShioriKrkr: CxDec scheme loaded");
+        std::string hxLine;
+        if (shiorikrkr::hxInstall(scheme, hostLog, hxLine)) {
+            // Hx: the XP3 reader decrypts the indexed members itself (shiori_hx_link.cpp).
+            hasHx = true;
+            hostLog("ShioriKrkr: " + hxLine);
+        } else if (!hxLine.empty()) {
+            hostLog("ShioriKrkr: " + hxLine);
+            return SHIORIKRKR_ERROR_SCHEME;
+        } else {
+            h.cx = std::make_unique<shiorikrkr::CxDecryptor>(scheme);
+            TVPSetXP3ArchiveExtractionFilter(xp3Filter);
+            // Members the archive stores plainly (info flags 0) are read as they are, as GARbro does.
+            TVPXP3FilterOnlyFlaggedMembers = true;
+            hostLog("ShioriKrkr: CxDec scheme loaded");
+        }
     }
     // NEKO WORKs archives (NEKOPARA): their key comes from their own PNG and Ogg entries.
     h.neko = {};
-    if (!h.cx) {
+    if (!h.cx && !hasHx) {
         std::string line;
         if (shiorikrkr::detectNekoWorksKey(root, h.neko, line)) {
             TVPSetXP3ArchiveExtractionFilter(xp3Filter);
@@ -707,6 +720,7 @@ SHIORIKRKR_EXPORT void shiorikrkr_stop(void) {
     h.cursor = 0;
     TVPXP3FilterOnlyFlaggedMembers = false;
     TVPSetXP3ArchiveExtractionFilter(nullptr);
+    shiorikrkr::hxUninstall();
     h.cx.reset();
     h.neko = {};
     h.started = false;

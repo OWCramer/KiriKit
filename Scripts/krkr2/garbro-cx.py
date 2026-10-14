@@ -3,6 +3,10 @@
 # MIT licence, https://github.com/crskycode/GARbro) as a Shiori scheme file for the engine
 # (AETHERKIRI_CX_SCHEME; layout in AetherKrkr's XP3ArchiveCxDecoder.cpp, patch 0015).
 #
+# Hx titles (KiriKiri Z's Hxv4 archives: GARbro's HxCrypt) are written as SHCX version 2: the
+# same CxDec part, then an Hx section with the index keys per archive, the filter key, the
+# random type and GARbro's names list if it has one (layout: Engine/shiori_hx.cpp, HxScheme).
+#
 # usage: garbro-cx.py <Formats.dat> "<GARbro title>" <out.shcx>
 #        garbro-cx.py <Formats.dat> --list [filter]
 # Scheme files hold key material for commercial titles: keep them out of public packages.
@@ -121,8 +125,44 @@ def schemes():
     for oid,o in objs.items():
         if isinstance(o,dict) and 'key' in o and 'value' in o:
             k=deref(o['key']); v=deref(o['value'])
-            if isinstance(k,str) and isinstance(v,dict) and v.get('__class','').endswith('CxEncryption'):
+            if isinstance(k,str) and isinstance(v,dict) and v.get('__class','').endswith(('CxEncryption','.HxCrypt')):
                 yield k,v
+def hx_key(k1,k2):
+    k1=bytes(k1 or b''); k2=bytes(k2 or b'')
+    return (k1,k2) if len(k1)==32 and len(k2)==16 else None
+def hx_names(db_path, names_file):
+    # GARbro's names list ("hash:name" lines, 16 hex digits for a directory, 64 for a file),
+    # beside Formats.dat in ArcFormats/Resources, when GARbro has one for the title.
+    import os
+    dirs={}; files={}
+    path=os.path.join(os.path.dirname(db_path), names_file or '')
+    if names_file and os.path.isfile(path):
+        for line in open(path,encoding='utf-8',errors='replace'):
+            h,_,name=line.rstrip('\r\n').partition(':')
+            if len(h)==16: dirs[bytes.fromhex(h)]=name
+            elif len(h)==64: files[bytes.fromhex(h)]=name
+    return dirs,files
+def hx_section(v, db_path):
+    out=bytearray(b'HXv4')+struct.pack('<IQ',v.get('RandomType') or 0,(v.get('FilterKey') or 0)&0xffffffffffffffff)
+    default=hx_key(v.get('IndexKey1'),v.get('IndexKey2'))
+    out+=bytes([1 if default else 0])+(default[0]+default[1] if default else bytes(48))
+    keys=[]
+    d=v.get('IndexKeyDict')
+    if isinstance(d,dict):
+        for kv in d.get('KeyValuePairs') or []:
+            kv=deref(kv)
+            if not isinstance(kv,dict): continue
+            name=deref(kv.get('key')); hk=deref(kv.get('value'))
+            k=hx_key(hk.get('Key1'),hk.get('Key2')) if isinstance(hk,dict) else None
+            if isinstance(name,str) and k: keys.append((name,k))
+    out+=struct.pack('<I',len(keys))
+    for name,(k1,k2) in keys:
+        n=name.encode('utf-8'); out+=struct.pack('<H',len(n))+n+k1+k2
+    for table in hx_names(db_path, v.get('NamesFile')):
+        out+=struct.pack('<I',len(table))
+        for h,name in table.items():
+            n=name.encode('utf-8'); out+=h+struct.pack('<H',len(n))+n
+    return bytes(out)
 if __name__=='__main__':
     load(sys.argv[1])
     if sys.argv[2]=='--list':
@@ -137,8 +177,10 @@ if __name__=='__main__':
     control=v['ControlBlock']
     if not isinstance(control,list) or len(control)!=1024:
         sys.exit('scheme %r has no embedded control block (it reads one from %s)' % (title, v.get('TpmFileName')))
-    out=bytearray(b'SHCX')+struct.pack('<III',1,v['m_mask'],v['m_offset'])
+    hx=v.get('__class','').endswith('.HxCrypt')
+    out=bytearray(b'SHCX')+struct.pack('<III',2 if hx else 1,v['m_mask'],v['m_offset'])
     out+=bytes(v['PrologOrder'])+bytes(v['OddBranchOrder'])+bytes(v['EvenBranchOrder'])+b'\0\0\0'
     out+=struct.pack('<1024I',*[c & 0xffffffff for c in control])
+    if hx: out+=hx_section(v, sys.argv[1])
     open(sys.argv[3],'wb').write(out)
     print('wrote', sys.argv[3], len(out), 'bytes for', title)

@@ -342,7 +342,7 @@ index 42dc4c6..a8468ea 100644
  }
 +#endif // SHIORIKRKR
 diff --git a/cpp/core/base/XP3Archive.cpp b/cpp/core/base/XP3Archive.cpp
-index 11d8371..3fe15e0 100644
+index 11d8371..74045c3 100644
 --- a/cpp/core/base/XP3Archive.cpp
 +++ b/cpp/core/base/XP3Archive.cpp
 @@ -20,6 +20,8 @@
@@ -354,15 +354,20 @@ index 11d8371..3fe15e0 100644
  
  bool TVPAllowExtractProtectedStorage = true;
  
-@@ -34,6 +36,7 @@ void TVPSetXP3ArchiveExtractionFilter(tTVPXP3ArchiveExtractionFilter filter) {
+@@ -34,6 +36,12 @@ void TVPSetXP3ArchiveExtractionFilter(tTVPXP3ArchiveExtractionFilter filter) {
  //---------------------------------------------------------------------------
  
  static tTVPXP3ArchiveContentFilter TVPXP3ArchiveContentFilter = nullptr;
 +bool TVPXP3FilterOnlyFlaggedMembers = false; // Shiori
++#ifdef SHIORIKRKR
++bool (*TVPShioriHxReadIndex)(const ttstr &, const tjs_uint8 *, tjs_uint,
++                             std::vector<tTVPShioriHxMember> &) = nullptr;
++void (*TVPShioriHxDecrypt)(tjs_uint64, tjs_uint64, tjs_uint64, tjs_uint8 *, tjs_uint) = nullptr;
++#endif
  
  void TVPSetXP3ArchiveContentFilter(tTVPXP3ArchiveContentFilter filter) {
      TVPXP3ArchiveContentFilter = filter;
-@@ -177,6 +180,15 @@ static void TVPFreeArchiveHandlePool() {
+@@ -177,6 +185,15 @@ static void TVPFreeArchiveHandlePool() {
      }
  }
  
@@ -378,7 +383,7 @@ index 11d8371..3fe15e0 100644
  //---------------------------------------------------------------------------
  static void TVPShutdownArchiveHandleCache() {
      // free all stream and shutdown the pool
-@@ -189,6 +201,12 @@ static void TVPShutdownArchiveHandleCache() {
+@@ -189,6 +206,12 @@ static void TVPShutdownArchiveHandleCache() {
      for(tjs_int i = 0; i < TVP_MAX_ARCHIVE_HANDLE_CACHE; i++) {
          if(TVPArchiveHandleCachePool[i].Stream)
              delete TVPArchiveHandleCachePool[i].Stream;
@@ -391,7 +396,7 @@ index 11d8371..3fe15e0 100644
      }
      delete[] TVPArchiveHandleCachePool;
  }
-@@ -403,6 +421,74 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+@@ -403,6 +426,110 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
                  TVPThrowExceptionMessage(TVPReadError);
              }
  
@@ -462,11 +467,47 @@ index 11d8371..3fe15e0 100644
 +                    pos = body + (tjs_uint)size;
 +                }
 +            }
++            // Shiori: an Hx archive's 'Hxv4' chunk points at its encrypted index (u64 offset,
++            // u32 size, u16 flags), which names the numbered File entries and holds their keys.
++            std::unordered_map<std::string, tTVPShioriHxMember> hx_members; // by Number
++            std::unordered_set<std::string> hx_names; // real names, normalized
++            static const tjs_uint8 cn_hxv4[] = {0x48, 0x78, 0x76, 0x34};
++            {
++                tjs_uint ch_start = 0;
++                tjs_uint ch_size = index_size;
++                if(TVPShioriHxReadIndex && FindChunk(indexdata, cn_hxv4, ch_start, ch_size) &&
++                   ch_size >= 12) {
++                    const tjs_uint64 hx_offset = ReadI64FromMem(indexdata + ch_start);
++                    const tjs_uint hx_size = ReadI32FromMem(indexdata + ch_start + 8);
++                    const tjs_uint64 resume = st->GetPosition();
++                    std::vector<tjs_uint8> blob(hx_size);
++                    st->SetPosition(hx_offset + offset);
++                    if(hx_size)
++                        st->ReadBuffer(blob.data(), hx_size);
++                    st->SetPosition(resume);
++                    ttstr archive = ArchiveName;
++                    const tjs_char *base = archive.c_str();
++                    for(const tjs_char *c = base; *c; ++c)
++                        if(*c == TJS_W('/') || *c == TJS_W('\\') || *c == TJS_W('>'))
++                            base = c + 1;
++                    std::vector<tTVPShioriHxMember> members;
++                    if(TVPShioriHxReadIndex(ttstr(base), blob.data(), hx_size, members)) {
++                        for(auto &member : members) {
++                            if(!member.Name.IsEmpty()) {
++                                if(normalizeName)
++                                    NormalizeInArchiveStorageName(member.Name);
++                                hx_names.insert(member.Name.AsStdString());
++                            }
++                            hx_members[member.Number.AsStdString()] = member;
++                        }
++                    }
++                }
++            }
 +#endif
              // read index information from memory
              tjs_uint ch_file_start = 0;
              tjs_uint ch_file_size = index_size;
-@@ -411,6 +497,9 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+@@ -411,6 +538,9 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
                  // find 'File' chunk
                  if(!FindChunk(indexdata, cn_File, ch_file_start, ch_file_size))
                      break; // not found
@@ -476,7 +517,7 @@ index 11d8371..3fe15e0 100644
  
                  // find 'info' sub-chunk
                  tjs_uint ch_info_start = ch_file_start;
-@@ -426,6 +515,7 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+@@ -426,6 +556,7 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
                     (flags & TVP_XP3_FILE_PROTECTED))
                      TVPThrowExceptionMessage(
                          TVPSpecifiedStorageHadBeenProtected);
@@ -484,12 +525,28 @@ index 11d8371..3fe15e0 100644
                  item.OrgSize = ReadI64FromMem(indexdata + ch_info_start + 4);
                  item.ArcSize = ReadI64FromMem(indexdata + ch_info_start + 12);
  
-@@ -487,6 +577,36 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+@@ -487,6 +618,52 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
  
                  // read 'aldr' sub-chunk
                  item.FileHash = ReadI32FromMem(indexdata + ch_adlr_start);
 +#ifdef SHIORIKRKR
 +                bool decoy = false;
++                if(!hx_members.empty()) {
++                    auto member = hx_members.find(item.Name.AsStdString());
++                    if(member != hx_members.end()) {
++                        item.HxMember = true;
++                        item.HxId = member->second.Id;
++                        item.HxKey = member->second.Key;
++                        if(!member->second.Name.IsEmpty())
++                            item.Name = member->second.Name;
++                    } else if(item.InfoFlags != 0) {
++                        // A protected entry outside the index that a real name also claims
++                        // (startup.tjs) is a decoy for extractors.
++                        ttstr plain = item.Name;
++                        NormalizeInArchiveStorageName(plain);
++                        decoy = hx_names.count(plain.AsStdString()) != 0;
++                    }
++                }
 +                if(!hashed_names.empty()) {
 +                    auto positional = names_by_position.find(this_file_body);
 +                    auto real = hashed_names.find(item.FileHash);
@@ -521,7 +578,7 @@ index 11d8371..3fe15e0 100644
  
                  // push information
                  ItemVector.push_back(item);
-@@ -495,6 +615,7 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
+@@ -495,6 +672,7 @@ void tTVPXP3Archive::Init(tTJSBinaryStream *st, tjs_int64 off,
                  ch_file_start += ch_file_size;
                  ch_file_size = index_size - ch_file_start;
                  Count++;
@@ -529,45 +586,73 @@ index 11d8371..3fe15e0 100644
              }
  
              if(!(index_flag & TVP_XP3_INDEX_CONTINUE))
-@@ -995,7 +1116,8 @@ tjs_uint tTVPXP3ArchiveStream::Read(void *buffer, tjs_uint read_size) {
+@@ -995,7 +1173,17 @@ tjs_uint tTVPXP3ArchiveStream::Read(void *buffer, tjs_uint read_size) {
          }
  
          // execute filter (for encryption method)
 -        if(TVPXP3ArchiveExtractionFilter) {
++#ifdef SHIORIKRKR
++        if(TVPShioriHxDecrypt && Owner->GetItem(StorageIndex).HxMember) {
++            // Shiori: an Hx member (its plainly stored ones, info flags 0, stay as they are)
++            const auto &item = Owner->GetItem(StorageIndex);
++            if(item.InfoFlags != 0)
++                TVPShioriHxDecrypt(item.HxId, item.HxKey, CurPos,
++                                   (tjs_uint8 *)buffer + write_size, one_size);
++        } else
++#endif
 +        if(TVPXP3ArchiveExtractionFilter &&
 +           (!TVPXP3FilterOnlyFlaggedMembers || Owner->GetInfoFlags(StorageIndex) != 0)) {
              tTVPXP3ExtractionFilterInfo info(
                  CurPos, (tjs_uint8 *)buffer + write_size, one_size,
                  Owner->GetFileHash(StorageIndex), Owner->GetName(StorageIndex));
 diff --git a/cpp/core/base/XP3Archive.h b/cpp/core/base/XP3Archive.h
-index 8b6c0e7..34f38f1 100644
+index 8b6c0e7..2f340e7 100644
 --- a/cpp/core/base/XP3Archive.h
 +++ b/cpp/core/base/XP3Archive.h
-@@ -62,6 +62,9 @@ TJS_EXP_FUNC_DEF(void, TVPSetXP3ArchiveExtractionFilter,
+@@ -62,6 +62,25 @@ TJS_EXP_FUNC_DEF(void, TVPSetXP3ArchiveExtractionFilter,
  
  TJS_EXP_FUNC_DEF(void, TVPSetXP3ArchiveContentFilter,
                   (tTVPXP3ArchiveContentFilter filter));
 +// Shiori: when set, the extraction filter only runs on members whose 'info' flags are
 +// non-zero (an archive's plainly stored members, such as its extraction warning, stay as they are).
 +extern bool TVPXP3FilterOnlyFlaggedMembers;
++#ifdef SHIORIKRKR
++// Shiori: KiriKiri Z Hx archives (an 'Hxv4' index chunk). The host reads the index the chunk
++// points at (TVPShioriHxReadIndex: each member's numbered name, its real name when known, its
++// id and file key) and decrypts those members' reads (TVPShioriHxDecrypt, in place of the
++// extraction filter). Both null when the game isn't an Hx title.
++struct tTVPShioriHxMember {
++    ttstr Number; // the name the File entry carries
++    ttstr Name;   // directory/name, empty when not known
++    tjs_uint64 Id = 0;
++    tjs_uint64 Key = 0;
++};
++extern bool (*TVPShioriHxReadIndex)(const ttstr &archive, const tjs_uint8 *blob, tjs_uint size,
++                                    std::vector<tTVPShioriHxMember> &members);
++extern void (*TVPShioriHxDecrypt)(tjs_uint64 id, tjs_uint64 key, tjs_uint64 offset,
++                                  tjs_uint8 *buffer, tjs_uint size);
++#endif
  //---------------------------------------------------------------------------
  
  //---------------------------------------------------------------------------
-@@ -100,6 +103,7 @@ public:
+@@ -100,6 +119,9 @@ public:
          tjs_uint32 FileHash{};
          tjs_uint64 OrgSize{}; // original ( uncompressed ) size
          tjs_uint64 ArcSize{}; // in-archive size
 +        tjs_uint32 InfoFlags = 0; // Shiori: the 'info' chunk's flags (0: stored plain)
++        bool HxMember = false; // Shiori: listed in the archive's Hx index
++        tjs_uint64 HxId = 0, HxKey = 0;
          std::vector<tTVPXP3ArchiveSegment> Segments;
  
          bool operator<(const tArchiveItem &rhs) const {
-@@ -135,6 +139,9 @@ public:
+@@ -135,6 +157,10 @@ public:
      [[nodiscard]] tjs_uint32 GetFileHash(tjs_uint idx) const {
          return ItemVector[idx].FileHash;
      }
 +    [[nodiscard]] tjs_uint32 GetInfoFlags(tjs_uint idx) const {
 +        return ItemVector[idx].InfoFlags;
 +    }
++    [[nodiscard]] const tArchiveItem &GetItem(tjs_uint idx) const { return ItemVector[idx]; } // Shiori
  
      ttstr GetName(tjs_uint idx) override { return ItemVector[idx].Name; }
  
