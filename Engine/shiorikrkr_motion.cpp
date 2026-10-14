@@ -542,6 +542,11 @@ public:
         // 0xAARRGGBB here; the host takes 0xRRGGBBAA.
         const tjs_uint32 argb = tjs_uint32(tjs_int64(number(p, n, 0, 0xFFFFFFFF)));
         const double v[3] = {double((argb << 8) | (argb >> 24)), number(p, n, 1), number(p, n, 2)};
+        if (getenv("SHIORIKRKR_TRACE_EMOTE")) {
+            char line[128];
+            snprintf(line, sizeof line, "E-mote setColor %p 0x%08X over %.0f frames", (void *)self, argb, v[1]);
+            TVPAddLog(ttstr(line));
+        }
         self->command("color", "", v, 3);
         return TJS_S_OK;
     }

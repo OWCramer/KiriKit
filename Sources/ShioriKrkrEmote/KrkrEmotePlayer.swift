@@ -322,8 +322,11 @@ public final class KrkrEmotePlayer {
         (red.current(clock), green.current(clock), blue.current(clock), alpha.current(clock))
     }
 
+    /// E-mote's colour multiplies with 0x80 as neutral for red, green and blue (games reset a
+    /// character with 0xFF808080; values above 0x80 brighten). Alpha's 0xFF is opaque.
     public func setColor(_ rgba: UInt32, frames: Double, easing: Double) {
-        let parts = [Double(rgba >> 24 & 0xFF), Double(rgba >> 16 & 0xFF), Double(rgba >> 8 & 0xFF), Double(rgba & 0xFF)].map { $0 / 255 }
+        let parts = [Double(rgba >> 24 & 0xFF) / 128, Double(rgba >> 16 & 0xFF) / 128, Double(rgba >> 8 & 0xFF) / 128,
+                     Double(rgba & 0xFF) / 255]
         red.set(parts[0], frames: frames, easing: easing, clock: clock)
         green.set(parts[1], frames: frames, easing: easing, clock: clock)
         blue.set(parts[2], frames: frames, easing: easing, clock: clock)
