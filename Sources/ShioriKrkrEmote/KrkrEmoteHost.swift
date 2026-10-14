@@ -223,7 +223,15 @@ public final class KrkrEmoteHost {
         guard let gpu, let finisher, width > 0, height > 0, pitch % 4 == 0 else { return false }
         let tint = p.tint
         let visible = p.shown && tint.a > 0
-        if !visible && blend { return false }
+        if !visible && blend {
+            if Self.trace {
+                traceCount += 1
+                if traceCount % 60 == 1 {
+                    FileHandle.standardError.write("emote host: GPU draw skipped (shown \(p.shown), tint \(tint))\n".data(using: .utf8)!)
+                }
+            }
+            return false
+        }
         if gpuTarget == nil || gpuTarget!.width != width || gpuTarget!.height != height {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
             d.usage = [.renderTarget, .shaderRead]

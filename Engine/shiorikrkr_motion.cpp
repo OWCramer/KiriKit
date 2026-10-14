@@ -345,6 +345,14 @@ public:
         if (texture_) texture_->Release();
     }
     void captureCanvas(iTJSDispatch2 *target);
+    // Before a frame's first draw: the canvas starts again from the clear colour. Drawing
+    // between captures piles up (several characters on one canvas); a capture with no draw
+    // since keeps the last picture, as the Direct3D canvas does (a title held still).
+    void beginDraw() {
+        if (cleared_) return;
+        clearCanvas();
+        cleared_ = true;
+    }
     void unloadUnusedTextures() {}
 
     /// The canvas as the compositor's texture (GPU drawing), or null (CPU drawing).
@@ -394,6 +402,7 @@ private:
     std::vector<uint8_t> pixels_, scratch_;
     iTVPTexture2D *texture_ = nullptr;
     tjs_uint32 clear_ = 0;
+    bool cleared_ = true;
 };
 
 // Motion.EmotePlayer: an E-mote character drawn into a layer.
@@ -450,14 +459,16 @@ public:
     // game set (setDrawAffineTranslateMatrix).
     void draw(iTJSDispatch2 *target) {
         static int traced = 0;
-        if (getenv("SHIORIKRKR_TRACE_EMOTE") && traced++ < 20) {
-            char line[160];
-            snprintf(line, sizeof line, "E-mote draw call %p: adaptor %d ensure %d", (void *)this,
-                     target && ncbInstanceAdaptor<ShioriD3DAdaptor>::GetNativeInstance(target) != nullptr, ensure() ? 1 : 0);
+        if (getenv("SHIORIKRKR_TRACE_EMOTE") && traced++ < (getenv("SHIORIKRKR_TRACE_EMOTE_ALL") ? 1000000 : 20)) {
+            char line[256];
+            snprintf(line, sizeof line, "E-mote draw call %p (%s %s): adaptor %d ensure %d", (void *)this, chara_.c_str(),
+                     motion_.c_str(), target && ncbInstanceAdaptor<ShioriD3DAdaptor>::GetNativeInstance(target) != nullptr,
+                     ensure() ? 1 : 0);
             TVPAddLog(ttstr(line));
         }
         if (auto *canvas = target ? ncbInstanceAdaptor<ShioriD3DAdaptor>::GetNativeInstance(target) : nullptr) {
             if (!ensure() || !host() || !canvas->width() || !canvas->height()) return;
+            canvas->beginDraw();
             if (canvas->texture()) {
                 hostCommand(player(), "show");
                 const auto drawStart = std::chrono::steady_clock::now();
@@ -529,22 +540,22 @@ public:
     // Transition times (coord, rotation, scale, colour, variables, timeline blends and fades)
     // are in frames of 1/60 s, as the games pass them (AffineSourceMotion.tjs converts its
     // milliseconds with `time * 60 / 1000` before calling); only progress() takes milliseconds.
-    static tjs_error setCoord(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+    template <class Self = ShioriLayerEmotePlayer> static tjs_error setCoord(tTJSVariant *, tjs_int n, tTJSVariant **p, Self *self) {
         const double v[4] = {number(p, n, 0), number(p, n, 1), number(p, n, 2), number(p, n, 3)};
         self->command("coord", "", v, 4);
         return TJS_S_OK;
     }
-    static tjs_error setRotate(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+    template <class Self = ShioriLayerEmotePlayer> static tjs_error setRotate(tTJSVariant *, tjs_int n, tTJSVariant **p, Self *self) {
         const double v[3] = {number(p, n, 0), number(p, n, 1), number(p, n, 2)};
         self->command("rot", "", v, 3);
         return TJS_S_OK;
     }
-    static tjs_error setScale(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+    template <class Self = ShioriLayerEmotePlayer> static tjs_error setScale(tTJSVariant *, tjs_int n, tTJSVariant **p, Self *self) {
         const double v[3] = {number(p, n, 0, 1), number(p, n, 1), number(p, n, 2)};
         self->command("scale", "", v, 3);
         return TJS_S_OK;
     }
-    static tjs_error setColor(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+    template <class Self = ShioriLayerEmotePlayer> static tjs_error setColor(tTJSVariant *, tjs_int n, tTJSVariant **p, Self *self) {
         // 0xAARRGGBB here; the host takes 0xRRGGBBAA.
         const tjs_uint32 argb = tjs_uint32(tjs_int64(number(p, n, 0, 0xFFFFFFFF)));
         const double v[3] = {double((argb << 8) | (argb >> 24)), number(p, n, 1), number(p, n, 2)};
@@ -556,12 +567,12 @@ public:
         self->command("color", "", v, 3);
         return TJS_S_OK;
     }
-    static tjs_error setVariable(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+    template <class Self = ShioriLayerEmotePlayer> static tjs_error setVariable(tTJSVariant *, tjs_int n, tTJSVariant **p, Self *self) {
         const double v[3] = {number(p, n, 1), number(p, n, 2), number(p, n, 3)};
         self->command("variable", text(p, n, 0), v, 3);
         return TJS_S_OK;
     }
-    static tjs_error getVariable(tTJSVariant *r, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+    template <class Self = ShioriLayerEmotePlayer> static tjs_error getVariable(tTJSVariant *r, tjs_int n, tTJSVariant **p, Self *self) {
         if (r) *r = self->ensure() ? hostNumber(self->player(), "variable", text(p, n, 0)) : 0.0;
         return TJS_S_OK;
     }
@@ -576,13 +587,13 @@ public:
         affine_[5] = ty;
     }
     void setCameraOffset(tjs_real, tjs_real) {}
-    static tjs_error startWind(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+    template <class Self = ShioriLayerEmotePlayer> static tjs_error startWind(tTJSVariant *, tjs_int n, tTJSVariant **p, Self *self) {
         const double v[5] = {number(p, n, 0), number(p, n, 1), number(p, n, 2), number(p, n, 3), number(p, n, 4)};
         self->command("wind", "", v, 5);
         return TJS_S_OK;
     }
     void stopWind() { command("windstop"); }
-    static tjs_error contains(tTJSVariant *r, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+    template <class Self = ShioriLayerEmotePlayer> static tjs_error contains(tTJSVariant *r, tjs_int n, tTJSVariant **p, Self *self) {
         std::string label;
         int first = 0;
         if (n >= 3) {
@@ -597,12 +608,12 @@ public:
     void skipToSync() { command("skip"); }
     void pass() { command("pass"); }
     void stop() { command("stop"); }
-    static tjs_error playTimeline(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+    template <class Self = ShioriLayerEmotePlayer> static tjs_error playTimeline(tTJSVariant *, tjs_int n, tTJSVariant **p, Self *self) {
         const double v[1] = {number(p, n, 1)};
         self->command("play", text(p, n, 0), v, 1);
         return TJS_S_OK;
     }
-    static tjs_error stopTimeline(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+    template <class Self = ShioriLayerEmotePlayer> static tjs_error stopTimeline(tTJSVariant *, tjs_int n, tTJSVariant **p, Self *self) {
         self->command("stop", text(p, n, 0));
         return TJS_S_OK;
     }
@@ -611,12 +622,12 @@ public:
     tjs_real getTimelineTotalFrameCount(ttstr label) { return ensure() ? hostNumber(player(), "length", utf8(label)) : 0; }
     tTJSVariant getMainTimelineLabelList() { return stringArray(labels("main")); }
     tTJSVariant getDiffTimelineLabelList() { return stringArray(labels("diff")); }
-    static tjs_error setTimelineBlendRatio(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+    template <class Self = ShioriLayerEmotePlayer> static tjs_error setTimelineBlendRatio(tTJSVariant *, tjs_int n, tTJSVariant **p, Self *self) {
         const double v[4] = {number(p, n, 1, 1), number(p, n, 2), number(p, n, 3), number(p, n, 4)};
         self->command("blend", text(p, n, 0), v, 4);
         return TJS_S_OK;
     }
-    static tjs_error fadeInTimeline(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+    template <class Self = ShioriLayerEmotePlayer> static tjs_error fadeInTimeline(tTJSVariant *, tjs_int n, tTJSVariant **p, Self *self) {
         const double play[1] = {number(p, n, 3)};
         self->command("play", text(p, n, 0), play, 1);
         const double zero[4] = {0, 0, 0, 0};
@@ -625,7 +636,7 @@ public:
         self->command("blend", text(p, n, 0), v, 4);
         return TJS_S_OK;
     }
-    static tjs_error fadeOutTimeline(tTJSVariant *, tjs_int n, tTJSVariant **p, ShioriLayerEmotePlayer *self) {
+    template <class Self = ShioriLayerEmotePlayer> static tjs_error fadeOutTimeline(tTJSVariant *, tjs_int n, tTJSVariant **p, Self *self) {
         const double v[2] = {number(p, n, 1), number(p, n, 2)};
         self->command("fadeout", text(p, n, 0), v, 2);
         return TJS_S_OK;
@@ -723,22 +734,24 @@ private:
     tjs_real meshDivision_ = 1, bust_ = 1, hair_ = 1, parts_ = 1, colorWeight_ = 1;
 };
 
+// The raw callbacks are instantiated for the class being registered: ncbind finds the native
+// instance by the callback's own class, so Motion.Player's need Motion.Player's.
 #define SHIORI_LAYER_EMOTE_METHODS \
     NCB_CONSTRUCTOR((ShioriMotionResources *)); \
     NCB_METHOD(play); NCB_METHOD(initPhysics); NCB_METHOD(serialize); NCB_METHOD(unserialize); \
     NCB_METHOD(clear); NCB_METHOD(progress); NCB_METHOD(draw); \
-    RawCallback("setCoord", &Class::setCoord, 0); RawCallback("setRotate", &Class::setRotate, 0); \
-    RawCallback("setScale", &Class::setScale, 0); RawCallback("setColor", &Class::setColor, 0); \
-    RawCallback("setVariable", &Class::setVariable, 0); RawCallback("getVariable", &Class::getVariable, 0); \
+    RawCallback("setCoord", &Class::template setCoord<Class>, 0); RawCallback("setRotate", &Class::template setRotate<Class>, 0); \
+    RawCallback("setScale", &Class::template setScale<Class>, 0); RawCallback("setColor", &Class::template setColor<Class>, 0); \
+    RawCallback("setVariable", &Class::template setVariable<Class>, 0); RawCallback("getVariable", &Class::template getVariable<Class>, 0); \
     NCB_METHOD(setOuterForce); NCB_METHOD(setDrawAffineTranslateMatrix); NCB_METHOD(setCameraOffset); \
-    RawCallback("startWind", &Class::startWind, 0); NCB_METHOD(stopWind); \
-    RawCallback("contains", &Class::contains, 0); RawCallback("hitTest", &Class::contains, 0); \
+    RawCallback("startWind", &Class::template startWind<Class>, 0); NCB_METHOD(stopWind); \
+    RawCallback("contains", &Class::template contains<Class>, 0); RawCallback("hitTest", &Class::template contains<Class>, 0); \
     NCB_METHOD(skip); NCB_METHOD(skipToSync); NCB_METHOD(pass); NCB_METHOD(stop); \
-    RawCallback("playTimeline", &Class::playTimeline, 0); RawCallback("stopTimeline", &Class::stopTimeline, 0); \
+    RawCallback("playTimeline", &Class::template playTimeline<Class>, 0); RawCallback("stopTimeline", &Class::template stopTimeline<Class>, 0); \
     NCB_METHOD(getTimelinePlaying); NCB_METHOD(getLoopTimeline); NCB_METHOD(getTimelineTotalFrameCount); \
     NCB_METHOD(getMainTimelineLabelList); NCB_METHOD(getDiffTimelineLabelList); \
-    RawCallback("setTimelineBlendRatio", &Class::setTimelineBlendRatio, 0); \
-    RawCallback("fadeInTimeline", &Class::fadeInTimeline, 0); RawCallback("fadeOutTimeline", &Class::fadeOutTimeline, 0); \
+    RawCallback("setTimelineBlendRatio", &Class::template setTimelineBlendRatio<Class>, 0); \
+    RawCallback("fadeInTimeline", &Class::template fadeInTimeline<Class>, 0); RawCallback("fadeOutTimeline", &Class::template fadeOutTimeline<Class>, 0); \
     NCB_METHOD(getPlayingTimelineInfoList); NCB_METHOD(getVariableFrameList); \
     NCB_PROPERTY(animating, getAnimating, setAnimating); NCB_PROPERTY(playing, getPlaying, setPlaying); \
     NCB_PROPERTY(allplaying, getAllplaying, setAllplaying); NCB_PROPERTY(loopTime, getLoopTime, setLoopTime); \
@@ -787,7 +800,7 @@ NCB_REGISTER_SUBCLASS(ShioriLayerMotionPlayer) {
 void ShioriD3DAdaptor::captureCanvas(iTJSDispatch2 *target) {
     tTJSNI_BaseLayer *layer = layerOf(target);
     static int traced = 0;
-    if (getenv("SHIORIKRKR_TRACE_EMOTE") && traced++ < 10)
+    if (getenv("SHIORIKRKR_TRACE_EMOTE") && traced++ < (getenv("SHIORIKRKR_TRACE_EMOTE_ALL") ? 1000000 : 10))
         fprintf(stderr, "D3DAdaptor captureCanvas into %p (%dx%d)\n", (void *)layer, layer ? int(layer->GetImageWidth()) : -1,
                 layer ? int(layer->GetImageHeight()) : -1);
     if (!layer || !width_ || !height_) return;
@@ -803,7 +816,7 @@ void ShioriD3DAdaptor::captureCanvas(iTJSDispatch2 *target) {
         tRenderTexRectArray::Element from[] = {tRenderTexRectArray::Element(texture_, all)};
         manager->OperateRect(copy, out, nullptr, all, tRenderTexRectArray(from));
         layer->Update();
-        clearCanvas();
+        cleared_ = false; // cleared before the next draw
         return;
     }
     auto *out = static_cast<uint8_t *>(layer->GetMainImagePixelBufferForWrite());
@@ -811,7 +824,7 @@ void ShioriD3DAdaptor::captureCanvas(iTJSDispatch2 *target) {
     const tjs_int pitch = layer->GetMainImagePixelBufferPitch();
     for (int y = 0; y < height_; ++y) memcpy(out + size_t(y) * pitch, &pixels_[size_t(y) * width_ * 4], size_t(width_) * 4);
     layer->Update();
-    clearCanvas();
+    cleared_ = false; // cleared before the next draw
 }
 
 NCB_REGISTER_SUBCLASS(ShioriD3DAdaptor) {

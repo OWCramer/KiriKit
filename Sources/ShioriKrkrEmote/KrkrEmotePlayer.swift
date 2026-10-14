@@ -182,16 +182,7 @@ public final class KrkrEmotePlayer {
     /// Where the playing motion is (frames), looping or holding its last frame as it says.
     var motionTime: Double {
         guard let m = motionPlay, let motion = models.first?.objects[m.object]?[m.motion] else { return 0 }
-        var t = clock - m.start
-        if motion.lastTime > 0, t > motion.lastTime {
-            if motion.loopTime >= 0, motion.lastTime > motion.loopTime {
-                t = motion.loopTime + (t - motion.loopTime).truncatingRemainder(dividingBy: motion.lastTime - motion.loopTime)
-            } else {
-                // Held on its last frame: the keys at lastTime itself end the layers.
-                t = max(0, motion.lastTime - 0.001)
-            }
-        }
-        return t
+        return EmoteRenderer.playTime(clock - m.start, of: motion)
     }
 
     /// Whether the playing motion has frames still to come (one that loops never ends).
