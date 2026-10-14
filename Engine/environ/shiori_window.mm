@@ -452,6 +452,64 @@ void shiori::pointerUp(int button, int x, int y) {
     if (auto *w = target()) w->mouseUp(buttonFor(button), x, y, true);
 }
 
+namespace {
+bool gTouchEnabled = false;
+struct TouchPoint { int id, x, y, startX, startY; };
+std::vector<TouchPoint> gTouches;
+} // namespace
+
+bool shiori::touchEnabled() { return gTouchEnabled; }
+void shiori::setTouchEnabled(bool enabled) {
+    gTouchEnabled = enabled;
+    if (!enabled) gTouches.clear();
+}
+int shiori::touchCount() { return int(gTouches.size()); }
+bool shiori::touchPoint(int index, int &x, int &y, int &id) {
+    if (index < 0 || index >= int(gTouches.size())) return false;
+    x = gTouches[index].x;
+    y = gTouches[index].y;
+    id = gTouches[index].id;
+    return true;
+}
+
+void shiori_touch_set_enabled(bool enabled) { shiori::setTouchEnabled(enabled); }
+bool shiori_touch_enabled() { return shiori::touchEnabled(); }
+int shiori_touch_count() { return shiori::touchCount(); }
+double shiori_touch_value(int index, int which) {
+    if (index < 0 || index >= int(gTouches.size())) return 0;
+    const TouchPoint &t = gTouches[index];
+    switch (which) {
+    case 0: return t.x;
+    case 1: return t.y;
+    case 2: return t.id;
+    case 3: return t.startX;
+    default: return t.startY;
+    }
+}
+
+void shiori::touch(int phase, int id, int x, int y) {
+    if (!gTouchEnabled) return;
+    auto found = std::find_if(gTouches.begin(), gTouches.end(), [id](const TouchPoint &t) { return t.id == id; });
+    auto *w = target();
+    tTJSNI_BaseWindow *instance = w ? w->Instance : nullptr;
+    // A finger is about 8 pixels across here (the contact size Windows reports with a touch).
+    switch (phase) {
+    case 0:
+        if (found == gTouches.end()) gTouches.push_back({id, x, y, x, y});
+        else *found = {id, x, y, x, y};
+        if (instance) TVPPostInputEvent(new tTVPOnTouchDownInputEvent(instance, x, y, 8, 8, tjs_uint32(id)));
+        break;
+    case 1:
+        if (found != gTouches.end()) found->x = x, found->y = y;
+        if (instance) TVPPostInputEvent(new tTVPOnTouchMoveInputEvent(instance, x, y, 8, 8, tjs_uint32(id)), TVP_EPT_DISCARDABLE);
+        break;
+    default:
+        if (found != gTouches.end()) gTouches.erase(found);
+        if (instance) TVPPostInputEvent(new tTVPOnTouchUpInputEvent(instance, x, y, 8, 8, tjs_uint32(id)));
+        break;
+    }
+}
+
 void shiori::wheel(int delta, int x, int y) {
     if (auto *w = target()) w->mouseWheel(delta, x, y);
 }

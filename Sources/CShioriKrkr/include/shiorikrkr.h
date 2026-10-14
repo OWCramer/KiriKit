@@ -166,6 +166,11 @@ enum { SHIORIKRKR_POINTER_DOWN = 0, SHIORIKRKR_POINTER_MOVED = 1, SHIORIKRKR_POI
 enum { SHIORIKRKR_BUTTON_LEFT = 0, SHIORIKRKR_BUTTON_RIGHT = 1, SHIORIKRKR_BUTTON_MIDDLE = 2 };
 void shiorikrkr_pointer(int32_t phase, float x, float y, int32_t button);
 
+/* A finger, beside the pointer events it also makes (as Windows sends a touch to KiriKiri:
+ * onTouchDown/Move/Up and the mouse). Reaches the game only while it turned touch on
+ * (Window.enableTouch); phase 0 down, 1 moved, 2 up or cancelled; id tells fingers apart. */
+void shiorikrkr_touch(int32_t phase, float x, float y, int32_t id);
+
 /* The mouse wheel (positive dy scrolls up, KiriKiri's backlog), at a normalized point. */
 void shiorikrkr_wheel(float dy, float x, float y);
 

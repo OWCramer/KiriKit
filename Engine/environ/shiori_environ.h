@@ -62,6 +62,15 @@ void wheel(int delta, int x, int y);
 void keyDown(int virtualKey);
 void keyUp(int virtualKey);
 void lastPointer(int &x, int &y);
+// Touch (a finger, as Windows reports it to KiriKiri: onTouchDown/Move/Up on the window, beside
+// the mouse events the same finger makes). Sent only while the game turned touch on
+// (Window.enableTouch, kztouch.dll); phase 0 down, 1 moved, 2 up.
+void touch(int phase, int id, int x, int y);
+bool touchEnabled();
+void setTouchEnabled(bool enabled);
+// The fingers down now: count, and each one's place and id.
+int touchCount();
+bool touchPoint(int index, int &x, int &y, int &id);
 // Keeps the pointer position the scripts read (Window.cursorX/Y, System.getCursorPos).
 void setLastPointer(int x, int y);
 

@@ -198,6 +198,23 @@ int evaluate(const std::string &expression, std::string &text) {
             for (const auto &s : found) text += s + " ";
             return 0;
         }
+        // "#list:<archive>[|<text>]": the member names of an archive beside the game's
+        // executable (those containing <text>), e.g. to find a game's scenarios.
+        if (expression.rfind("#list:", 0) == 0) {
+            const std::string rest = expression.substr(6);
+            const size_t bar = rest.find('|');
+            const std::string name = rest.substr(0, bar), needle = bar == std::string::npos ? "" : rest.substr(bar + 1);
+            ttstr path(name.c_str());
+            if (name.find("://") == std::string::npos) path = TVPGetAppPath() + path;
+            tTVPArchive *archive = TVPOpenArchive(path, true);
+            if (!archive) { text = "cannot open"; return 1; }
+            for (tjs_uint i = 0; i < archive->GetCount(); ++i) {
+                const std::string member = archive->GetName(i).AsStdString();
+                if (needle.empty() || member.find(needle) != std::string::npos) text += member + "\n";
+            }
+            archive->Release();
+            return 0;
+        }
         // "#disasm:<storage>|<text>": the VM code of a compiled script's functions whose
         // disassembly mentions <text> (a member's name), to see how a script calls a plug-in.
         if (expression.rfind("#disasm:", 0) == 0) {
@@ -298,6 +315,7 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
         return SHIORIKRKR_ERROR_ARGUMENTS;
     h.log = config->log;
     h.presents = config->host_presents != 0;
+    shiori::setTouchEnabled(false); // until the game turns touch on
     h.sawContent = false;
     h.presentedSerial = 0;
     h.logContext = config->log_context;
@@ -682,6 +700,17 @@ SHIORIKRKR_EXPORT void shiorikrkr_pointer(int32_t phase, float x, float y, int32
         }});
         break;
     }
+}
+
+SHIORIKRKR_EXPORT void shiorikrkr_touch(int32_t phase, float x, float y, int32_t id) {
+    Host &h = host();
+    if (!h.started || !shiori::touchEnabled()) return;
+    int px = 0, py = 0;
+    canvasPoint(x, y, px, py);
+    // In order with the pointer events the same finger makes (the touch first, as Windows).
+    auto event = [phase, id, px, py] { shiori::touch(phase, id, px, py); };
+    if (phase == 1 && h.input.empty()) event();
+    else h.input.push_back({false, event});
 }
 
 SHIORIKRKR_EXPORT void shiorikrkr_wheel(float dy, float x, float y) {

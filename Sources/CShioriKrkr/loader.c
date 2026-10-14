@@ -34,6 +34,7 @@ const shiorikrkr_api_t *shiorikrkr_load(const char *path, char *error, uint32_t 
     RESOLVE(canvas_size, "shiorikrkr_canvas_size")
     RESOLVE(pointer, "shiorikrkr_pointer")
     RESOLVE(wheel, "shiorikrkr_wheel")
+    RESOLVE(touch, "shiorikrkr_touch")
     RESOLVE(key, "shiorikrkr_key")
     RESOLVE(eval, "shiorikrkr_eval")
     RESOLVE(capture, "shiorikrkr_capture")

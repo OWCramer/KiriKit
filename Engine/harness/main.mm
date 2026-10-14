@@ -25,6 +25,7 @@
 #include <exception>
 #include <unistd.h>
 #include <map>
+#include <array>
 #include <string>
 #include <thread>
 #include <vector>
@@ -116,6 +117,8 @@ int main(int argc, char **argv) {
         int sessions = 1; // --again: leave the game and start it again in the same process
         std::multimap<int, std::pair<float, float>> clicks;
         std::multimap<int, int> keys; // --key FRAME:VK (hex or decimal): pressed, then let go after a few ticks
+        // --swipe FRAME:X0,Y0,X1,Y1: a finger dragged across over 10 ticks (touch and pointer, as the app sends)
+        std::multimap<int, std::array<float, 4>> swipes;
         std::multimap<int, std::string> evals, captures;
         std::vector<std::string> options;
         auto split = [](const std::string &s) {
@@ -146,6 +149,11 @@ int main(int argc, char **argv) {
             } else if (a == "--key") {
                 auto [frame, rest] = split(next());
                 keys.emplace(frame, int(std::strtol(rest.c_str(), nullptr, 0)));
+            } else if (a == "--swipe") {
+                auto [frame, rest] = split(next());
+                std::array<float, 4> v{};
+                std::sscanf(rest.c_str(), "%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3]);
+                swipes.emplace(frame, v);
             } else if (a == "--eval") {
                 auto [frame, rest] = split(next());
                 evals.emplace(frame, rest);
@@ -260,6 +268,20 @@ int main(int argc, char **argv) {
                 shiorikrkr_pointer(SHIORIKRKR_POINTER_DOWN, it->second.first, it->second.second, SHIORIKRKR_BUTTON_LEFT);
                 shiorikrkr_tick();
                 shiorikrkr_pointer(SHIORIKRKR_POINTER_UP, it->second.first, it->second.second, SHIORIKRKR_BUTTON_LEFT);
+            }
+            for (auto it = swipes.lower_bound(frame); it != swipes.upper_bound(frame); ++it) {
+                const auto &v = it->second;
+                std::printf("== frame %d: swipe %.3f,%.3f -> %.3f,%.3f\n", frame, v[0], v[1], v[2], v[3]);
+                shiorikrkr_touch(0, v[0], v[1], 1);
+                shiorikrkr_pointer(SHIORIKRKR_POINTER_DOWN, v[0], v[1], SHIORIKRKR_BUTTON_LEFT);
+                for (int step = 1; step <= 10; ++step) {
+                    shiorikrkr_tick();
+                    const float x = v[0] + (v[2] - v[0]) * step / 10, y = v[1] + (v[3] - v[1]) * step / 10;
+                    shiorikrkr_touch(1, x, y, 1);
+                    shiorikrkr_pointer(SHIORIKRKR_POINTER_MOVED, x, y, SHIORIKRKR_BUTTON_LEFT);
+                }
+                shiorikrkr_touch(2, v[2], v[3], 1);
+                shiorikrkr_pointer(SHIORIKRKR_POINTER_UP, v[2], v[3], SHIORIKRKR_BUTTON_LEFT);
             }
             for (auto it = keys.lower_bound(frame); it != keys.upper_bound(frame); ++it) {
                 std::printf("== frame %d: key 0x%02X\n", frame, it->second);

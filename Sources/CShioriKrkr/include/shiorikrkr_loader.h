@@ -23,6 +23,7 @@ typedef struct shiorikrkr_api {
     void (*canvas_size)(int32_t *width, int32_t *height);
     void (*pointer)(int32_t phase, float x, float y, int32_t button);
     void (*wheel)(float dy, float x, float y);
+    void (*touch)(int32_t phase, float x, float y, int32_t id);
     void (*key)(int32_t virtual_key, int32_t down);
     int (*eval)(const char *expression, char *out, uint32_t capacity);
     int (*capture)(const char *path);

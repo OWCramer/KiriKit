@@ -954,10 +954,39 @@ index 256c70e..927621f 100644
  }
  TJS_END_NATIVE_PROP_GETTER
 diff --git a/cpp/core/environ/win32/TVPWindow.h b/cpp/core/environ/win32/TVPWindow.h
-index f1f07ee..9769d25 100644
+index f1f07ee..6563e16 100644
 --- a/cpp/core/environ/win32/TVPWindow.h
 +++ b/cpp/core/environ/win32/TVPWindow.h
-@@ -433,7 +433,11 @@ public:
+@@ -317,6 +317,14 @@ namespace cocos2d {
+     class Node;
+ }
+ 
++#ifdef SHIORIKRKR
++// Shiori's touch state (environ/shiori_window.mm). Value: 0 x, 1 y, 2 id, 3 start x, 4 start y.
++void shiori_touch_set_enabled(bool enabled);
++bool shiori_touch_enabled();
++int shiori_touch_count();
++double shiori_touch_value(int index, int which);
++#endif
++
+ class iWindowLayer {
+ protected:
+     tTVPMouseCursorState MouseCursorState = mcsVisible;
+@@ -425,15 +433,25 @@ public:
+     [[nodiscard]] bool GetFocusable() const { return true; }
+     int GetDisplayRotate() { return 0; }
+     int GetDisplayOrientation() { return orientLandscape; }
++#ifdef SHIORIKRKR
++    // Shiori: touch from the host's fingers (environ/shiori_window.mm).
++    void SetEnableTouch(bool b) { shiori_touch_set_enabled(b); }
++    [[nodiscard]] bool GetEnableTouch() const { return shiori_touch_enabled(); }
++#else
+     void SetEnableTouch(bool b) {}
+     [[nodiscard]] bool GetEnableTouch() const { return false; }
++#endif
+     void SetHintDelay(tjs_int delay) { HintDelay = delay; }
+     [[nodiscard]] tjs_int GetHintDelay() const { return HintDelay; }
+     void SetInnerSunken(bool b) {}
      [[nodiscard]] bool GetInnerSunken() const { return false; }
  
      // TODO
@@ -969,6 +998,29 @@ index f1f07ee..9769d25 100644
      void SetHintText(iTJSDispatch2 *sender, const ttstr &text) {}
      void DisableAttentionPoint() {}
      static void GetVideoOffset(tjs_int &ofsx, tjs_int &ofsy) {
+@@ -448,6 +466,14 @@ public:
+         TouchRotateThreshold = threshold;
+     }
+     double GetTouchRotateThreshold() { return TouchRotateThreshold; }
++#ifdef SHIORIKRKR
++    [[nodiscard]] tjs_real GetTouchPointStartX(tjs_int index) const { return shiori_touch_value(index, 3); }
++    [[nodiscard]] tjs_real GetTouchPointStartY(tjs_int index) const { return shiori_touch_value(index, 4); }
++    [[nodiscard]] tjs_real GetTouchPointX(tjs_int index) const { return shiori_touch_value(index, 0); }
++    [[nodiscard]] tjs_real GetTouchPointY(tjs_int index) const { return shiori_touch_value(index, 1); }
++    [[nodiscard]] tjs_int GetTouchPointID(tjs_int index) const { return tjs_int(shiori_touch_value(index, 2)); }
++    [[nodiscard]] tjs_int GetTouchPointCount() const { return shiori_touch_count(); }
++#else
+     [[nodiscard]] tjs_real GetTouchPointStartX(tjs_int index) const {
+         return 0;
+     }
+@@ -458,6 +484,7 @@ public:
+     [[nodiscard]] tjs_real GetTouchPointY(tjs_int index) const { return 0; }
+     [[nodiscard]] tjs_int GetTouchPointID(tjs_int index) const { return 0; }
+     [[nodiscard]] tjs_int GetTouchPointCount() const { return 0; }
++#endif
+     bool GetTouchVelocity(tjs_int id, float &x, float &y, float &speed) const {
+         return false;
+     }
 diff --git a/cpp/core/plugin/PluginImpl.cpp b/cpp/core/plugin/PluginImpl.cpp
 index 601cab8..4e77cc4 100644
 --- a/cpp/core/plugin/PluginImpl.cpp
