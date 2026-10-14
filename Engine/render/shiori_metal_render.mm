@@ -1282,22 +1282,23 @@ private:
         Software->OperateTriangles(m->Inner, nTriangles, targetTex, reftar, rc, pt, textures);
         if (!onGPU) return;
         save(cpuResult);
-        size_t off = 0;
-        for (size_t i = 0; i < cpuResult.size(); ++i)
-            for (int b = 0; b < 32; b += 8) {
-                int d = int((cpuResult[i] >> b) & 0xff) - int((gpuResult[i] >> b) & 0xff);
-                if (d > 1 || d < -1) {
-                    ++off;
-                    break;
-                }
-            }
+        size_t off = 0, far = 0;
+        int largest = 0;
+        for (size_t i = 0; i < cpuResult.size(); ++i) {
+            int most = 0;
+            for (int b = 0; b < 32; b += 8)
+                most = std::max(most, std::abs(int((cpuResult[i] >> b) & 0xff) - int((gpuResult[i] >> b) & 0xff)));
+            if (most > 1) ++off;
+            if (most > 8) ++far;
+            largest = std::max(largest, most);
+        }
         OpStat &st = Stats[m->GetName() + "(warp check)"];
         st.gpu += 1;
         st.pixels += cpuResult.size();
         if (off * 1000 > cpuResult.size()) { // more than 0.1% of the pixels
             if (st.mismatches++ < 3)
-                fprintf(stderr, "shiorikrkr metal verify: %s warp: %zu of %zu pixels differ (stretch type %d)\n",
-                        m->GetName().c_str(), off, cpuResult.size(), StretchType);
+                fprintf(stderr, "shiorikrkr metal verify: %s warp: %zu of %zu pixels differ, %zu by more than 8, at most %d (stretch type %d)\n",
+                        m->GetName().c_str(), off, cpuResult.size(), far, largest, StretchType);
         }
     }
 
