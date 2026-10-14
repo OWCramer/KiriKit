@@ -1,5 +1,5 @@
 diff --git a/cpp/core/base/EventIntf.cpp b/cpp/core/base/EventIntf.cpp
-index a172e1d..3514ac9 100644
+index a172e1d..9e12d29 100644
 --- a/cpp/core/base/EventIntf.cpp
 +++ b/cpp/core/base/EventIntf.cpp
 @@ -12,6 +12,23 @@
@@ -83,6 +83,19 @@ index a172e1d..3514ac9 100644
  
  static void TVPDestroyContinuousHandlerVector() {
      std::vector<tTJSVariantClosure>::iterator i;
+@@ -976,6 +1017,12 @@ void TVPDeliverCompactEvent(tjs_int level) {
+             }
+         }
+     }
++#ifdef SHIORIKRKR
++    // Not on the idle compaction (every 4 s with no continuous handler): saving the system
++    // variables writes the game's whole system file, a long frame each time. The app saves
++    // them when it leaves the screen or the game, and the games save them at their own points.
++    if(level != TVP_COMPACT_LEVEL_IDLE)
++#endif
+     TVPDoSaveSystemVariables();
+ #if 0
+     if( level >= TVP_COMPACT_LEVEL_MAX && TVPEnableGlobalHeapCompaction )
 diff --git a/cpp/core/base/ScriptMgnIntf.cpp b/cpp/core/base/ScriptMgnIntf.cpp
 index 757f829..cf0378a 100644
 --- a/cpp/core/base/ScriptMgnIntf.cpp
@@ -117,7 +130,7 @@ index 757f829..cf0378a 100644
              if(!TVPIsExistentStorage(TJS_W("system/Initialize.tjs"))) {
                  throw;
 diff --git a/cpp/core/base/StorageIntf.cpp b/cpp/core/base/StorageIntf.cpp
-index e0f1f66..7ce4238 100644
+index e0f1f66..6cf1091 100644
 --- a/cpp/core/base/StorageIntf.cpp
 +++ b/cpp/core/base/StorageIntf.cpp
 @@ -552,6 +552,12 @@ void TVPGetLocalName(ttstr &name) {
@@ -211,7 +224,43 @@ index e0f1f66..7ce4238 100644
      if(i != TVPAutoPathList.end())
          TVPAutoPathList.erase(i);
  
-@@ -1092,6 +1133,41 @@ ttstr TVPGetPlacedPath(const ttstr &name) {
+@@ -956,6 +997,9 @@ void TVPRemoveAutoPath(const ttstr &name) {
+ }
+ 
+ //---------------------------------------------------------------------------
++#ifdef SHIORIKRKR
++extern tjs_uint TVPShioriAutoPathGeneration;
++#endif
+ static tjs_uint TVPRebuildAutoPathTable() {
+     // rebuild auto path table
+     if(AutoPathTableInit)
+@@ -1050,10 +1094,25 @@ static tjs_uint TVPRebuildAutoPathTable() {
+               ttstr((tjs_int)(endtick - tick)) + TJS_W("ms)"));
+ 
+     AutoPathTableInit = true;
++#ifdef SHIORIKRKR
++    ++TVPShioriAutoPathGeneration;
++#endif
+ 
+     return totalcount;
+ }
+ //---------------------------------------------------------------------------
++#ifdef SHIORIKRKR
++// Shiori: the names in the auto path folders (the image prefetcher's index), and a count that
++// changes whenever the table is rebuilt (a game adds auto paths as it starts).
++tjs_uint TVPShioriAutoPathGeneration = 0;
++void TVPShioriAutoPathNames(std::vector<ttstr> &out) {
++    TVPRebuildAutoPathTable();
++    tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
++    for(auto it = TVPAutoPathTable.GetFirst(); !it.IsNull(); ++it)
++        out.push_back(it.GetKey());
++}
++#endif
++//---------------------------------------------------------------------------
+ 
+ //---------------------------------------------------------------------------
+ // TVPGetPlacedPath
+@@ -1092,6 +1151,41 @@ ttstr TVPGetPlacedPath(const ttstr &name) {
  
      TVPRebuildAutoPathTable(); // ensure auto path table
      ttstr *result = TVPAutoPathTable.Find(storagename);
@@ -253,7 +302,7 @@ index e0f1f66..7ce4238 100644
      if(result) {
          // found in table
          ttstr found = *result + storagename;
-@@ -1230,6 +1306,35 @@ void TVPClearStorageCaches() {
+@@ -1230,6 +1324,35 @@ void TVPClearStorageCaches() {
  }
  //---------------------------------------------------------------------------
  

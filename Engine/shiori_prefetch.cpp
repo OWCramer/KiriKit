@@ -10,7 +10,9 @@
 // for the rest of a decode already under way) instead of decoding it again.
 //
 // The position comes from the pictures themselves: the last one loaded is found among the
-// current scenario's names, and the lookahead starts after it. Nothing here changes what the
+// current scenario's names, and the lookahead starts after it. Scenarios may name a picture
+// by part of its file name (Yuzusoft's "繁華街c" for "その他_繁華街c.png"): the pictures in the
+// auto path folders are indexed by their names and by each part after an underscore. Nothing here changes what the
 // game sees: the same storage, the same pixels, the same province image and meta information.
 // SHIORIKRKR_PREFETCH=0 turns it off; SHIORIKRKR_TRACE_PREFETCH=1 logs what it does.
 #include "tjsCommHead.h"
@@ -26,6 +28,7 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -34,11 +37,16 @@
 bool TVPShioriResolveGraphic(const ttstr &name, ttstr &placed, ttstr &province);
 iTVPTexture2D *TVPShioriDecodeGraphic(const ttstr &placed, std::vector<tTVPGraphicMetaInfoPair> **meta);
 bool TVPShioriGraphicCached(const ttstr &nname);
+extern tjs_uint TVPShioriAutoPathGeneration;
+void TVPShioriAutoPathNames(std::vector<ttstr> &out);
 
 namespace {
 
 constexpr size_t kAhead = 3;          // pictures decoded ahead of the last one loaded
+constexpr size_t kAheadFast = 8;      // the same while pictures come quickly (skipping)
 constexpr size_t kWindow = 80;        // names looked through after it
+constexpr size_t kWindowFast = 240;
+constexpr size_t kThreads = 2;        // decoding threads
 constexpr size_t kResolvesPerCall = 24; // names checked against storage per load (the engine thread)
 constexpr size_t kScenarios = 6;      // scenarios remembered (the newest is searched first)
 
@@ -98,18 +106,23 @@ struct Scenario {
 class Prefetcher {
 public:
     static Prefetcher &shared() {
-        static Prefetcher *p = new Prefetcher(); // lives for the process (its thread too)
+        static Prefetcher *p = new Prefetcher(); // lives for the process (its threads too)
         return *p;
     }
 
     void noteScenario(const std::string &name, const uint8_t *bytes, size_t size) {
+        ensureIndex();
         Scenario s;
         s.name = name;
         std::string run;
+        bool wide = false;
         auto flush = [&] {
             // A picture's name has a digit or an underscore (bg003_04, ev01a, bg_c_white); plain
-            // words of the text don't.
-            if (run.size() >= 3 && run.find_first_of("0123456789_") != std::string::npos) {
+            // words of the text don't. A name in another script counts when a picture has it.
+            const bool named = wide ? (run.size() <= 64 && index_.count(keyOf(run)))
+                                    : (run.size() >= 3 && run.find_first_of("0123456789_") != std::string::npos);
+            wide = false;
+            if (named) {
                 std::string key = keyOf(run);
                 if (!key.empty() && (s.keys.empty() || s.keys.back() != key)) {
                     s.first.emplace(key, s.keys.size());
@@ -120,7 +133,10 @@ public:
         };
         for (size_t i = 0; i < size; ++i) {
             const unsigned char c = bytes[i];
-            if (std::isalnum(c) || c == '_' || c == '-') run += char(c);
+            if (c >= 0x80) {
+                run += char(c);
+                wide = true;
+            } else if (std::isalnum(c) || c == '_' || c == '-') run += char(c);
             else flush();
         }
         flush();
@@ -130,18 +146,31 @@ public:
         scenarios_.push_front(std::move(s));
         if (scenarios_.size() > kScenarios) scenarios_.pop_back();
         trace("scenario " + name + ": " + std::to_string(scenarios_.front().keys.size()) + " names");
+        // Its first pictures start now (the game usually shows one as the scenario begins).
+        schedule(scenarios_.front(), 0, std::string());
     }
 
     // The game loaded `nname` (engine thread): start the next pictures after it.
     void used(const std::string &nname) {
         const std::string key = keyOf(nname);
         if (key.empty()) return;
-        for (size_t i = 0; i < scenarios_.size(); ++i) {
-            auto it = scenarios_[i].first.find(key);
-            if (it == scenarios_[i].first.end()) continue;
-            if (i) std::rotate(scenarios_.begin(), scenarios_.begin() + long(i), scenarios_.begin() + long(i) + 1);
-            schedule(scenarios_.front(), it->second + 1, key);
-            return;
+        // Skipping (four or more pictures in the last second): further ahead, more at once.
+        const auto now = std::chrono::steady_clock::now();
+        recent_.push_back(now);
+        while (!recent_.empty() && now - recent_.front() > std::chrono::seconds(1)) recent_.pop_front();
+        fast_ = recent_.size() >= 4;
+        // The scenario may name it by its whole name or by a part after an underscore.
+        std::vector<std::string> names{key};
+        for (size_t u = key.find('_'); u != std::string::npos && u + 1 < key.size(); u = key.find('_', u + 1))
+            names.push_back(key.substr(u + 1));
+        for (const std::string &n : names) {
+            for (size_t i = 0; i < scenarios_.size(); ++i) {
+                auto it = scenarios_[i].first.find(n);
+                if (it == scenarios_[i].first.end()) continue;
+                if (i) std::rotate(scenarios_.begin(), scenarios_.begin() + long(i), scenarios_.begin() + long(i) + 1);
+                schedule(scenarios_.front(), it->second + 1, key);
+                return;
+            }
         }
     }
 
@@ -151,9 +180,9 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         // Not started yet: the engine thread decodes it now, as it always did.
         queue_.erase(std::remove_if(queue_.begin(), queue_.end(), [&](const Job &j) { return j.key == key; }), queue_.end());
-        if (decoding_ == key) {
+        if (decoding_.count(key)) {
             const auto started = std::chrono::steady_clock::now();
-            done_.wait_for(lock, std::chrono::seconds(2), [&] { return decoding_ != key; });
+            done_.wait_for(lock, std::chrono::seconds(2), [&] { return !decoding_.count(key); });
             trace("waited " +
                   std::to_string(int(std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() * 1000)) +
                   " ms for " + key);
@@ -180,6 +209,8 @@ public:
     void reset() {
         scenarios_.clear();
         resolved_.clear();
+        index_.clear();
+        indexGeneration_ = ~0u;
         std::unique_lock<std::mutex> lock(mutex_);
         queue_.clear();
         done_.wait_for(lock, std::chrono::seconds(5), [&] { return decoding_.empty(); });
@@ -192,27 +223,36 @@ public:
     }
 
 private:
-    Prefetcher() : thread_([this] { run(); }) { thread_.detach(); }
+    Prefetcher() {
+        for (size_t i = 0; i < kThreads; ++i) std::thread([this] { run(); }).detach();
+    }
 
     void schedule(const Scenario &s, size_t from, const std::string &current) {
         std::vector<Job> wanted;
         size_t resolves = 0;
-        for (size_t i = from; i < s.keys.size() && i < from + kWindow && wanted.size() < kAhead; ++i) {
-            const std::string &key = s.keys[i];
-            if (key == current) continue;
-            auto r = resolved_.find(key);
+        const size_t ahead = fast_ ? kAheadFast : kAhead, window = fast_ ? kWindowFast : kWindow;
+        for (size_t i = from; i < s.keys.size() && i < from + window && wanted.size() < ahead; ++i) {
+            const std::string &name = s.keys[i];
+            if (name == current) continue;
+            auto r = resolved_.find(name);
             if (r == resolved_.end()) {
                 if (resolves++ >= kResolvesPerCall) break;
                 Resolved fresh;
-                fresh.image = TVPShioriResolveGraphic(ttstr(key.c_str()), fresh.placed, fresh.province);
-                r = resolved_.emplace(key, fresh).first;
+                auto indexed = index_.find(name);
+                const ttstr storage = indexed != index_.end() ? indexed->second : ttstr(name.c_str());
+                fresh.image = TVPShioriResolveGraphic(storage, fresh.placed, fresh.province);
+                r = resolved_.emplace(name, fresh).first;
             }
             if (!r->second.image) continue;
+            // Kept under the file's own name (what the game loads it by).
+            const std::string key = keyOf(r->second.placed.AsStdString());
+            if (key == current) continue;
             if (std::any_of(wanted.begin(), wanted.end(), [&](const Job &j) { return j.key == key; })) continue;
             if (TVPShioriGraphicCached(r->second.placed)) continue;
             wanted.push_back({key, r->second.placed, r->second.province});
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        maxReady_ = ahead + 2;
         // What's queued and no longer wanted (the story moved on) is dropped.
         queue_.erase(std::remove_if(queue_.begin(), queue_.end(),
                                     [&](const Job &j) {
@@ -220,12 +260,12 @@ private:
                                     }),
                      queue_.end());
         for (Job &j : wanted) {
-            if (ready_.count(j.key) || decoding_ == j.key) continue;
+            if (ready_.count(j.key) || decoding_.count(j.key)) continue;
             if (std::any_of(queue_.begin(), queue_.end(), [&](const Job &q) { return q.key == j.key; })) continue;
             trace("queued " + j.key);
             queue_.push_back(std::move(j));
         }
-        wake_.notify_one();
+        wake_.notify_all();
     }
 
     void run() {
@@ -236,7 +276,7 @@ private:
                 wake_.wait(lock, [&] { return !queue_.empty(); });
                 job = std::move(queue_.front());
                 queue_.pop_front();
-                decoding_ = job.key;
+                decoding_.insert(job.key);
             }
             const auto started = std::chrono::steady_clock::now();
             Decoded d;
@@ -246,7 +286,7 @@ private:
             const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                decoding_.clear();
+                decoding_.erase(job.key);
                 if (d.texture) {
                     auto old = ready_.find(job.key);
                     if (old != ready_.end()) {
@@ -258,7 +298,7 @@ private:
                     ready_[job.key] = d;
                     readyOrder_.push_back(job.key);
                     // At most a few decoded pictures wait here (the oldest go).
-                    while (readyOrder_.size() > kAhead + 2) {
+                    while (readyOrder_.size() > maxReady_) {
                         auto drop = ready_.find(readyOrder_.front());
                         if (drop != ready_.end()) {
                             drop->second.texture->Release();
@@ -276,17 +316,49 @@ private:
         }
     }
 
+    // The pictures in the auto path folders by name, and by each part of the name after an
+    // underscore (the first picture with that part); rebuilt when the folders change.
+    void ensureIndex() {
+        if (indexGeneration_ == TVPShioriAutoPathGeneration && !index_.empty()) return;
+        std::vector<ttstr> names;
+        try {
+            TVPShioriAutoPathNames(names);
+        } catch (...) {
+            return;
+        }
+        indexGeneration_ = TVPShioriAutoPathGeneration;
+        index_.clear();
+        static const char *const kImages[] = {".png", ".tlg", ".jpg", ".jpeg", ".bmp", ".webp", ".jxr", ".tga"};
+        for (const ttstr &n : names) {
+            const std::string name = n.AsStdString();
+            const std::string ext = extOf(name);
+            if (std::none_of(std::begin(kImages), std::end(kImages), [&](const char *e) { return ext == e; })) continue;
+            const std::string key = keyOf(name);
+            if (key.empty()) continue;
+            index_[key] = n;
+            for (size_t u = key.find('_'); u != std::string::npos && u + 1 < key.size(); u = key.find('_', u + 1))
+                index_.emplace(key.substr(u + 1), n);
+        }
+        resolved_.clear();
+        trace("index: " + std::to_string(index_.size()) + " names");
+    }
+
     // Engine thread only.
+    std::unordered_map<std::string, ttstr> index_;
+    tjs_uint indexGeneration_ = ~0u;
     std::deque<Scenario> scenarios_;
     std::unordered_map<std::string, Resolved> resolved_;
     // Shared with the decoding thread.
     std::mutex mutex_;
     std::condition_variable wake_, done_;
     std::deque<Job> queue_;
-    std::string decoding_;
+    std::set<std::string> decoding_;
+    size_t maxReady_ = kAhead + 2;
+    // Engine thread: when the last pictures were loaded, and whether that's quick (skipping).
+    std::deque<std::chrono::steady_clock::time_point> recent_;
+    bool fast_ = false;
     std::map<std::string, Decoded> ready_;
     std::vector<std::string> readyOrder_;
-    std::thread thread_;
 };
 
 } // namespace
