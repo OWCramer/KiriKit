@@ -1,17 +1,20 @@
 diff --git a/AlphaMovie.cpp b/AlphaMovie.cpp
-index a108d51..12198e3 100644
+index a108d51..839252c 100644
 --- a/AlphaMovie.cpp
 +++ b/AlphaMovie.cpp
-@@ -30,6 +30,8 @@
+@@ -30,7 +30,11 @@
  
  #include <math.h>
  #include <string.h>
 +#include <stdlib.h>
 +#include <stdio.h>
  #include <vector>
++#include <chrono>
++#include <future>
  
  //---------------------------------------------------------------------------
-@@ -151,7 +153,7 @@ struct HuffTable {
+ // リトルエンディアン読み出しヘルパ
+@@ -151,7 +155,7 @@ struct HuffTable {
  	}
  };
  
@@ -20,7 +23,7 @@ index a108d51..12198e3 100644
  struct BitReader {
  	const tjs_uint8 *p, *end;
  	tjs_uint32 acc;   // 現在のバイトのビット
-@@ -161,13 +163,10 @@ struct BitReader {
+@@ -161,13 +165,10 @@ struct BitReader {
  	inline int bit() {
  		if (cnt == 0) {
  			if (p >= end) return 0;         // データ枯渇時は 0 で埋める
@@ -38,7 +41,60 @@ index a108d51..12198e3 100644
  		}
  		cnt--;
  		return (acc >> cnt) & 1;
-@@ -336,6 +335,12 @@ static bool getLayerWriteBuffer(iTJSDispatch2 *lay, tjs_int &w, tjs_int &h,
+@@ -207,23 +208,45 @@ static void initCos() {
+ }
+ 
+ // 自然順の逆量子化済み係数 coef[64] → 空間 8x8 (レベルシフト +128 / クランプ)
++// Separable, in float, skipping what's zero: most of a movie frame's blocks have a DC and a few
++// low coefficients (a DC-only block is one value; rows with nothing are skipped), which took a
++// 1280x720 frame from about 9 ms to a few on a Mac.
+ static void idct8x8(const int *coef, tjs_uint8 *out /*[64] raster*/) {
+-	double tmp[64];
++	static float cosT[8][8];
++	static bool ready = false;
++	if (!ready) {
++		for (int x = 0; x < 8; x++)
++			for (int u = 0; u < 8; u++) cosT[x][u] = (float)g_cosT[x][u];
++		ready = true;
++	}
++	bool dcOnly = true;
++	for (int i = 1; i < 64 && dcOnly; i++) dcOnly = coef[i] == 0;
++	if (dcOnly) {
++		// cosT[x][0] = 0.5 / sqrt(2) for every x: the block is one value.
++		const tjs_uint8 v = clip8((int)floor(coef[0] * 0.125 + 128.0 + 0.5));
++		memset(out, v, 64);
++		return;
++	}
++	float tmp[64];
+ 	// 行方向 (u について)
+ 	for (int v = 0; v < 8; v++) {
+ 		const int *row = coef + v * 8;
++		int last = -1;
++		for (int u = 0; u < 8; u++) if (row[u]) last = u;
++		float *t = tmp + v * 8;
++		if (last < 0) { for (int x = 0; x < 8; x++) t[x] = 0.f; continue; }
+ 		for (int x = 0; x < 8; x++) {
+-			double s = 0.0;
+-			for (int u = 0; u < 8; u++) s += g_cosT[x][u] * row[u];
+-			tmp[v * 8 + x] = s;
++			float s = 0.f;
++			for (int u = 0; u <= last; u++) s += cosT[x][u] * (float)row[u];
++			t[x] = s;
+ 		}
+ 	}
+ 	// 列方向 (v について)
+ 	for (int x = 0; x < 8; x++) {
+ 		for (int y = 0; y < 8; y++) {
+-			double s = 0.0;
+-			for (int v = 0; v < 8; v++) s += g_cosT[y][v] * tmp[v * 8 + x];
+-			out[y * 8 + x] = clip8((int)floor(s + 128.0 + 0.5));
++			float s = 0.f;
++			for (int v = 0; v < 8; v++) s += cosT[y][v] * tmp[v * 8 + x];
++			out[y * 8 + x] = clip8((int)floorf(s + 128.0f + 0.5f));
+ 		}
+ 	}
+ }
+@@ -336,6 +359,12 @@ static bool getLayerWriteBuffer(iTJSDispatch2 *lay, tjs_int &w, tjs_int &h,
  	return (ptr != 0 && w > 0 && h > 0 && pitch != 0);
  }
  
@@ -51,19 +107,55 @@ index a108d51..12198e3 100644
  //---------------------------------------------------------------------------
  // AlphaMovie クラス本体
  //---------------------------------------------------------------------------
-@@ -358,7 +363,7 @@ public:
+@@ -358,7 +387,23 @@ public:
  
  	//----------------------------------------------------------- ストレージ操作
  	void closeStream() {
 -		if (Stream) { Stream->Destruct(); Stream = 0; }
++		dropAhead();
 +		if (Stream) { delete Stream; Stream = 0; }
++	}
++
++	// The next frame is decoded on another thread while the game shows this one (a full-screen
++	// frame takes several milliseconds), so showNextImage mostly only copies.
++	struct Decoded {
++		std::vector<tjs_uint8> pixels;
++		tjs_int left = 0, top = 0, width = 0, height = 0;
++	};
++	std::future<Decoded> Ahead;
++	tjs_int AheadIndex = -1;
++	void dropAhead() {
++		if (Ahead.valid()) {
++			try { Ahead.get(); } catch (...) {}
++		}
++		AheadIndex = -1;
  	}
  
  	// amv を開く
-@@ -487,6 +492,11 @@ public:
- 		decodeFrame(CurrentIndex, bgra, fleft, ftop, fw, fh);
+@@ -482,14 +527,40 @@ public:
+ 			}
+ 		}
  
- 		blitToLayer(layer, bgra, fleft, ftop, fw, fh);
+-		std::vector<tjs_uint8> bgra;
+-		tjs_int fleft, ftop, fw, fh;
+-		decodeFrame(CurrentIndex, bgra, fleft, ftop, fw, fh);
+-
+-		blitToLayer(layer, bgra, fleft, ftop, fw, fh);
++		Decoded frame;
++		const auto decodeStart = std::chrono::steady_clock::now();
++		const bool ready = AheadIndex == CurrentIndex && Ahead.valid();
++		if (ready) {
++			frame = Ahead.get();
++			AheadIndex = -1;
++		} else {
++			dropAhead();
++			decodeFrame(CurrentIndex, frame.pixels, frame.left, frame.top, frame.width, frame.height);
++		}
++		if (traceFrames())
++			fprintf(stderr, "amv frame %d %s in %.2f ms\n", (int)CurrentIndex, ready ? "taken" : "decoded",
++					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - decodeStart).count());
++
++		blitToLayer(layer, frame.pixels, frame.left, frame.top, frame.width, frame.height);
 +		// The layer's pixels changed behind its back: it redraws (as Layer.update()).
 +		{
 +			tTJSVariant dummy;
@@ -72,7 +164,29 @@ index a108d51..12198e3 100644
  
  		tjs_int ret = (tjs_int)Frames[CurrentIndex].number;
  		CurrentIndex++;
-@@ -530,7 +540,7 @@ private:
++		// Decode the frame after this one meanwhile (the first again when it loops).
++		tjs_int next = CurrentIndex;
++		if (next >= (tjs_int)Frames.size()) next = (Loop && NextMovieFile.length() == 0) ? 0 : -1;
++		if (next >= 0) {
++			AheadIndex = next;
++			Ahead = std::async(std::launch::async, [this, next] {
++				Decoded d;
++				decodeFrame(next, d.pixels, d.left, d.top, d.width, d.height);
++				return d;
++			});
++		}
+ 		return ret;
+ 	}
+ 
+@@ -506,6 +577,7 @@ public:
+ 	tjs_int getNumOfFrame() const { return (tjs_int)NumOfFrame; }
+ 	tjs_int getFrame() const { return CurrentIndex; }
+ 	void    setFrame(tjs_int v) {
++		dropAhead();
+ 		if (Frames.empty()) { CurrentIndex = 0; return; }
+ 		if (v < 0) v = 0;
+ 		if (v >= (tjs_int)Frames.size()) v = (tjs_int)Frames.size() - 1;
+@@ -530,7 +602,7 @@ private:
  	//----------------------------------------------------------- フレーム情報
  	struct FrameInfo { tjs_int64 offset; tjs_uint32 number; };
  
@@ -81,7 +195,7 @@ index a108d51..12198e3 100644
  	tjs_uint32 NumOfFrame;
  	tjs_int64  FirstFrameOfs;
  	tjs_uint16 Width, Height;
-@@ -576,7 +586,11 @@ private:
+@@ -576,7 +648,11 @@ private:
  		ftop  = rdS16(fh20 + 14);
  		fw    = rdU16(fh20 + 16);
  		fh    = rdU16(fh20 + 18);
@@ -94,7 +208,7 @@ index a108d51..12198e3 100644
  			TVPThrowExceptionMessage(TJS_W("File format error."));
  
  		tjs_uint payloadLen = size - 12;
-@@ -616,9 +630,16 @@ private:
+@@ -616,9 +692,16 @@ private:
  				int r = yy + ((91881  * (cr - 128)) >> 16);
  				int g = yy - ((22554  * (cb - 128) + 46802 * (cr - 128)) >> 16);
  				int b = yy + ((116130 * (cb - 128)) >> 16);
@@ -111,7 +225,7 @@ index a108d51..12198e3 100644
  				dst[3] = (tjs_uint8)a;
  			}
  		}
-@@ -642,7 +663,11 @@ private:
+@@ -642,7 +725,11 @@ private:
  		fw    = rdU16(fh24 + 16);
  		fh    = rdU16(fh24 + 18);
  		tjs_uint32 alphaZlibLen  = rdU32(fh24 + 20);
@@ -124,7 +238,7 @@ index a108d51..12198e3 100644
  			TVPThrowExceptionMessage(TJS_W("File format error."));
  
  		// alpha(zlib) が先
-@@ -695,9 +720,16 @@ private:
+@@ -695,9 +782,16 @@ private:
  				int r = yy + ((91881  * (cr - 128)) >> 16);
  				int g = yy - ((22554  * (cb - 128) + 46802 * (cr - 128)) >> 16);
  				int b = yy + ((116130 * (cb - 128)) >> 16);
@@ -141,7 +255,7 @@ index a108d51..12198e3 100644
  				dst[3] = ar[x];
  			}
  		}
-@@ -709,11 +741,29 @@ private:
+@@ -709,11 +803,29 @@ private:
  	void blitToLayer(iTJSDispatch2 *layer, std::vector<tjs_uint8> &bgra,
  					 tjs_int fleft, tjs_int ftop, tjs_int fw, tjs_int fh)
  	{
