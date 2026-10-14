@@ -1,0 +1,282 @@
+diff --git a/LayerExImage.cpp b/LayerExImage.cpp
+index a035ce5..9f0bd87 100644
+--- a/LayerExImage.cpp
++++ b/LayerExImage.cpp
+@@ -19,6 +19,38 @@ typedef unsigned short WORD;
+ #include <math.h>
+ #include "LayerExImage.h"
+ 
++#ifdef SHIORIKRKR
++bool ShioriLayerImageOp(iTJSDispatch2 *layer, int left, int top, int width, int height, unsigned op, const int *ints,
++                        const float *floats, const unsigned char *lut);
++bool ShioriLayerGaussianBlur(iTJSDispatch2 *layer, int left, int top, int width, int height, const float *matrix, int length);
++
++void
++layerExImage::reset()
++{
++	_width  = (GeometryT)_pWidth;
++	_height = (GeometryT)_pHeight;
++	_clipLeft   = (GeometryT)_pClipLeft;
++	_clipTop    = (GeometryT)_pClipTop;
++	_clipWidth  = (GeometryT)_pClipWidth;
++	_clipHeight = (GeometryT)_pClipHeight;
++	// The clip inside the image (the GPU's rectangle).
++	_gpuClip = _clipLeft >= 0 && _clipTop >= 0 && _clipWidth >= 0 && _clipHeight >= 0 &&
++		_clipLeft + _clipWidth <= _width && _clipTop + _clipHeight <= _height;
++	_buffer = 0;
++	_pitch  = 0;
++	_width  = _clipWidth;
++	_height = _clipHeight;
++}
++
++void
++layerExImage::cpuBuffer()
++{
++	if (_buffer) return;
++	_buffer = (BufferT)(ObjectCache::IntegerT)_pBuffer;
++	_pitch  = (PitchT)_pPitch;
++	_buffer += _clipTop * _pitch + _clipLeft * 4;
++}
++#else
+ void
+ layerExImage::reset()
+ {
+@@ -28,10 +60,15 @@ layerExImage::reset()
+ 	_width  = _clipWidth;
+ 	_height = _clipHeight;
+ }
++#endif
+ 
+ void
+ layerExImage::lut(BYTE* pLut)
+ {
++#ifdef SHIORIKRKR
++	if (_gpuClip && ShioriLayerImageOp(_obj, _clipLeft, _clipTop, _width, _height, 1, NULL, NULL, pLut)) return;
++	cpuBuffer();
++#endif
+ 	BYTE *src = (BYTE*)_buffer;
+ 	for (int i=0; i < _height ; i++){
+ 		BYTE *p = src;
+@@ -186,7 +223,18 @@ layerExImage::colorize(int hue, int sat, double blend)
+ 
+ 	bool bFullBlend = false;
+ 	if (blend > 0.999f)	bFullBlend = true;
+-	
++#ifdef SHIORIKRKR
++	{
++		const int ints[4] = { hue, sat, a0, a1 };
++		const float floats[3] = { bFullBlend ? 1.0f : 0.0f, 0, 0 };
++		if (_gpuClip && ShioriLayerImageOp(_obj, _clipLeft, _clipTop, _width, _height, 2, ints, floats, NULL)) {
++			redraw();
++			return;
++		}
++		cpuBuffer();
++	}
++#endif
++
+ 	RGBQUAD color,hsl;
+ 
+ 	BYTE *src = (BYTE*)_buffer;
+@@ -321,6 +369,16 @@ layerExImage::modulate(int hue, int saturation, int luminance)
+ 	double h = hue / 360.0f;
+ 	double s = saturation / 100.0f;
+ 	double l = luminance / 100.0f;
++#ifdef SHIORIKRKR
++	{
++		const float floats[3] = { (float)h, (float)s, (float)l };
++		if (_gpuClip && ShioriLayerImageOp(_obj, _clipLeft, _clipTop, _width, _height, 3, NULL, floats, NULL)) {
++			redraw();
++			return;
++		}
++		cpuBuffer();
++	}
++#endif
+ 
+ 	BYTE *src = (BYTE*)_buffer;
+ 	for (int y=0; y<_height; y++){
+@@ -347,6 +405,16 @@ layerExImage::modulate(int hue, int saturation, int luminance)
+ void
+ layerExImage::noise(int level)
+ {
++#ifdef SHIORIKRKR
++	{
++		const int ints[4] = { level, 0, 0, 0 };
++		if (_gpuClip && ShioriLayerImageOp(_obj, _clipLeft, _clipTop, _width, _height, 4, ints, NULL, NULL)) {
++			redraw();
++			return;
++		}
++		cpuBuffer();
++	}
++#endif
+ 	BYTE *src = (BYTE*)_buffer;
+ 	for (int y=0; y<_height; y++){
+ 		BYTE *p = src;
+@@ -370,6 +438,13 @@ layerExImage::noise(int level)
+ void
+ layerExImage::generateWhiteNoise()
+ {
++#ifdef SHIORIKRKR
++	if (_gpuClip && ShioriLayerImageOp(_obj, _clipLeft, _clipTop, _width, _height, 5, NULL, NULL, NULL)) {
++		redraw();
++		return;
++	}
++	cpuBuffer();
++#endif
+ 	BYTE *src = (BYTE*)_buffer;
+ 	for (int y=0; y<_height; y++){
+ 		BYTE *p = src;
+@@ -645,6 +720,15 @@ layerExImage::gaussianBlur(float radius /*= 1.0f*/)
+ 	// generate convolution matrix and make sure it's smaller than each dimension
+ 	float *cmatrix = NULL;
+ 	int32_t cmatrix_length = gen_convolve_matrix(radius, &cmatrix);
++#ifdef SHIORIKRKR
++	if (_gpuClip && ShioriLayerGaussianBlur(_obj, _clipLeft, _clipTop, _width, _height, cmatrix, cmatrix_length)) {
++		delete[] cmatrix;
++		delete[] tmpbuf;
++		redraw();
++		return;
++	}
++	cpuBuffer();
++#endif
+ 	// generate lookup table
+ 	float *ctable = gen_lookup_table(cmatrix, cmatrix_length);
+ 	
+diff --git a/LayerExImage.h b/LayerExImage.h
+index 6a1a7ac..7ed152a 100644
+--- a/LayerExImage.h
++++ b/LayerExImage.h
+@@ -1,64 +1,70 @@
+-#ifndef __LayerExImage__
+-#define __LayerExImage__
+-
+-#include "layerExBase.hpp"
+-
+-/**
+- * レイヤ拡張 イメージ操作用ネイティブインスタンス
+- */
+-class layerExImage : public layerExBase
+-{
+-public:
+-	// コンストラクタ
+-	layerExImage(DispatchT obj) : layerExBase(obj) {}
+-
+-	virtual void reset();
+-	
+-	/**
+-	 * ルックアップテーブル反映
+-	 * @param pLut lookup table
+-	 */
+-	void lut(BYTE* pLut);
+-	
+-	/**
+-	 * 明度とコントラスト
+-	 * @param brightness 明度 -255 ～ 255, 負数の場合は暗くなる
+-	 * @param contrast コントラスト -100 ～100, 0 の場合変化しない
+-	 */
+-	void light(int brightness, int contrast);
+-
+-	/**
+-	 * 色相と彩度を適応
+-	 * @param hue 色相
+-	 * @param sat 彩度
+-	 * @param blend ブレンド 0 (効果なし) ～ 1 (full effect)
+-	 */
+-	void colorize(int hue, int sat, double blend);
+-
+-	/**
+-	 * 色相と彩度と輝度調整
+-	 * @param hue 色相 -180～180 (度)
+-	 * @param saturation 彩度 -100～100 (%)
+-	 * @param luminance 輝度 -100～100 (%)
+-	 */
+-	void modulate(int hue, int saturation, int luminance);
+-	
+-	/**
+-	 * ノイズ追加
+-	 * @param level ノイズレベル 0 (no noise) ～ 255 (lot of noise).
+-	 */
+-	void noise(int level);
+-
+-	/**
+-	 * ノイズ生成（元の画像を無視してグレースケールのホワイトノイズを描画／α情報は維持）
+-	 */
+-	void generateWhiteNoise();
+-
+-	/**
+-	 * ガウスぼかし
+-	 * @param radius ぼかし度合い
+-	 */
+-	void gaussianBlur(float radius);
+-};
+-
++#ifndef __LayerExImage__
++#define __LayerExImage__
++
++#include "layerExBase.hpp"
++
++/**
++ * レイヤ拡張 イメージ操作用ネイティブインスタンス
++ */
++class layerExImage : public layerExBase
++{
++public:
++	// コンストラクタ
++	layerExImage(DispatchT obj) : layerExBase(obj) {}
++
++	virtual void reset();
++#ifdef SHIORIKRKR
++	// Shiori: reset() leaves the pixels alone (asking for them makes the CPU wait for the GPU's
++	// work on the layer); an operation asks only when the CPU does it.
++	void cpuBuffer();
++	bool _gpuClip;
++#endif
++	
++	/**
++	 * ルックアップテーブル反映
++	 * @param pLut lookup table
++	 */
++	void lut(BYTE* pLut);
++	
++	/**
++	 * 明度とコントラスト
++	 * @param brightness 明度 -255 ～ 255, 負数の場合は暗くなる
++	 * @param contrast コントラスト -100 ～100, 0 の場合変化しない
++	 */
++	void light(int brightness, int contrast);
++
++	/**
++	 * 色相と彩度を適応
++	 * @param hue 色相
++	 * @param sat 彩度
++	 * @param blend ブレンド 0 (効果なし) ～ 1 (full effect)
++	 */
++	void colorize(int hue, int sat, double blend);
++
++	/**
++	 * 色相と彩度と輝度調整
++	 * @param hue 色相 -180～180 (度)
++	 * @param saturation 彩度 -100～100 (%)
++	 * @param luminance 輝度 -100～100 (%)
++	 */
++	void modulate(int hue, int saturation, int luminance);
++	
++	/**
++	 * ノイズ追加
++	 * @param level ノイズレベル 0 (no noise) ～ 255 (lot of noise).
++	 */
++	void noise(int level);
++
++	/**
++	 * ノイズ生成（元の画像を無視してグレースケールのホワイトノイズを描画／α情報は維持）
++	 */
++	void generateWhiteNoise();
++
++	/**
++	 * ガウスぼかし
++	 * @param radius ぼかし度合い
++	 */
++	void gaussianBlur(float radius);
++};
++
+ #endif
+\ No newline at end of file

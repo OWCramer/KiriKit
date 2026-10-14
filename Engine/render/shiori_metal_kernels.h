@@ -460,6 +460,176 @@ kernel void shioriRasterCopy(device uint *tar [[buffer(0)]],
         if (x < int(p.width) + d) tar[row * p.tarPitch + p.left + uint(x)] = src[row * p.srcPitch + p.left + uint(x - d)];
     }
 }
+
+// layerExImage's operations on a layer's clip, one thread per pixel (pixels R, G, B, A from the
+// low byte, as Shiori's krkr2 keeps them). The arithmetic is the plug-in's (CxImage's DSP
+// functions), restated per pixel; the plug-in computes the same on the CPU when the GPU can't.
+struct ImageOpParams {
+    uint pitch;                     // pixels
+    uint left, top, width, height;  // the clip
+    uint op;                        // 1 lut, 2 colorize, 3 modulate, 4 noise, 5 white noise
+    int i0, i1, i2, i3;
+    float f0, f1, f2;
+    uint seed;
+};
+
+static uint shioriHash(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+    return x;
+}
+// 0..1 for a pixel, a channel and a call.
+static float shioriRandom(uint seed, uint x, uint y, uint c) {
+    return float(shioriHash(seed ^ shioriHash(x * 0x9E3779B1u ^ shioriHash(y * 0x85EBCA77u + c))) >> 8) / 16777215.0f;
+}
+
+// CxImage's RGBtoHSL (bytes, HSLMAX 255): returns H, S, L.
+static uint3 shioriRGBtoHSL(uint R, uint G, uint B) {
+    uint cMax = max(max(R, G), B), cMin = min(min(R, G), B);
+    uint L = ((cMax + cMin) * 255u + 255u) / 510u;
+    uint H, S;
+    if (cMax == cMin) {
+        S = 0; H = 170;
+    } else {
+        if (L <= 127u) S = (((cMax - cMin) * 255u) + ((cMax + cMin) / 2u)) / (cMax + cMin);
+        else S = (((cMax - cMin) * 255u) + ((510u - cMax - cMin) / 2u)) / (510u - cMax - cMin);
+        S &= 0xffu;
+        uint d = cMax - cMin;
+        uint Rd = ((((cMax - R) * 42u) + (d / 2u)) / d) & 0xffffu;
+        uint Gd = ((((cMax - G) * 42u) + (d / 2u)) / d) & 0xffffu;
+        uint Bd = ((((cMax - B) * 42u) + (d / 2u)) / d) & 0xffffu;
+        if (R == cMax) H = (Bd - Gd) & 0xffu;
+        else if (G == cMax) H = (85u + Rd - Bd) & 0xffu;
+        else H = (170u + Gd - Rd) & 0xffu;
+    }
+    return uint3(H, S, L);
+}
+static float shioriHueToRGB(float n1, float n2, float hue) {
+    if (hue > 360) hue -= 360;
+    else if (hue < 0) hue += 360;
+    if (hue < 60) return n1 + (n2 - n1) * hue / 60.0f;
+    if (hue < 180) return n2;
+    if (hue < 240) return n1 + (n2 - n1) * (240 - hue) / 60;
+    return n1;
+}
+// CxImage's HSLtoRGB: R, G, B.
+static uint3 shioriHSLtoRGB(uint Hb, uint Sb, uint Lb) {
+    float h = float(Hb) * 360.0f / 255.0f, s = float(Sb) / 255.0f, l = float(Lb) / 255.0f;
+    float m2 = l <= 0.5f ? l * (1 + s) : l + s - l * s;
+    float m1 = 2 * l - m2;
+    if (s == 0) {
+        uint v = uint(l * 255.0f) & 0xffu;
+        return uint3(v, v, v);
+    }
+    return uint3(uint(shioriHueToRGB(m1, m2, h + 120) * 255.0f) & 0xffu, uint(shioriHueToRGB(m1, m2, h) * 255.0f) & 0xffu,
+                 uint(shioriHueToRGB(m1, m2, h - 120) * 255.0f) & 0xffu);
+}
+static int shioriHue2rgb(float n1, float n2, float hue) {
+    if (hue < 0) hue += 1.0f;
+    else if (hue > 1.0f) hue -= 1.0f;
+    float c;
+    if (hue < 1.0f / 6.0f) c = n1 + (n2 - n1) * hue * 6.0f;
+    else if (hue < 0.5f) c = n2;
+    else if (hue < 2.0f / 3.0f) c = n1 + (n2 - n1) * (2.0f / 3.0f - hue) * 6.0f;
+    else c = n1;
+    return int(c * 255.0f);
+}
+
+kernel void shioriImageOp(device uint *img [[buffer(0)]],
+                          device const uchar *lut [[buffer(1)]],
+                          constant ImageOpParams &p [[buffer(2)]],
+                          uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= p.width || gid.y >= p.height) return;
+    const uint x = p.left + gid.x, y = p.top + gid.y;
+    const uint i = y * p.pitch + x;
+    const uint px = img[i];
+    uint R = px & 0xffu, G = (px >> 8) & 0xffu, B = (px >> 16) & 0xffu;
+    const uint A = px & 0xff000000u;
+    switch (p.op) {
+    case 1: R = lut[R]; G = lut[G]; B = lut[B]; break;
+    case 2: {
+        uint3 hsl = shioriRGBtoHSL(R, G, B);
+        uint3 c = shioriHSLtoRGB(uint(p.i0) & 0xffu, uint(p.i1) & 0xffu, hsl.z);
+        if (p.f0 > 0.5f) { R = c.x; G = c.y; B = c.z; }
+        else {
+            uint a0 = uint(p.i2), a1 = uint(p.i3);
+            R = ((c.x * a0 + R * a1) >> 8) & 0xffu;
+            G = ((c.y * a0 + G * a1) >> 8) & 0xffu;
+            B = ((c.z * a0 + B * a1) >> 8) & 0xffu;
+        }
+        break;
+    }
+    case 3: {
+        float red = R / 255.0f, green = G / 255.0f, blue = B / 255.0f;
+        float cMax = max(max(red, green), blue), cMin = min(min(red, green), blue);
+        float delta = cMax - cMin, add = cMax + cMin;
+        float lum = add / 2.0f, hue, sat;
+        if (delta == 0) { sat = 0; hue = 0; }
+        else {
+            sat = lum < 0.5f ? delta / add : delta / (2.0f - add);
+            if (red == cMax) hue = (green - blue) / delta;
+            else if (green == cMax) hue = 2.0f + (blue - red) / delta;
+            else hue = 4.0f + (red - green) / delta;
+            hue /= 6.0f;
+        }
+        hue += p.f0;
+        while (hue < 0) hue += 1.0f;
+        while (hue > 1.0f) hue -= 1.0f;
+        sat += p.f1 > 0 ? (1.0f - sat) * p.f1 : sat * p.f1;
+        lum += p.f2 > 0 ? (1.0f - lum) * p.f2 : lum * p.f2;
+        if (sat == 0.0f) { R = G = B = uint(int(lum * 255.0f)) & 0xffu; }
+        else {
+            float m2 = lum <= 0.5f ? lum * (1 + sat) : lum + sat - lum * sat;
+            float m1 = 2.0f * lum - m2;
+            R = uint(shioriHue2rgb(m1, m2, hue + 1.0f / 3.0f)) & 0xffu;
+            G = uint(shioriHue2rgb(m1, m2, hue)) & 0xffu;
+            B = uint(shioriHue2rgb(m1, m2, hue - 1.0f / 3.0f)) & 0xffu;
+        }
+        break;
+    }
+    case 4: {
+        float level = float(p.i0);
+        R = uint(clamp(int(R) + int((shioriRandom(p.seed, x, y, 0) - 0.5f) * level), 0, 255));
+        G = uint(clamp(int(G) + int((shioriRandom(p.seed, x, y, 1) - 0.5f) * level), 0, 255));
+        B = uint(clamp(int(B) + int((shioriRandom(p.seed, x, y, 2) - 0.5f) * level), 0, 255));
+        break;
+    }
+    case 5: R = G = B = min(uint(shioriRandom(p.seed, x, y, 0) * 256.0f), 255u); break;
+    }
+    img[i] = A | (B << 16) | (G << 8) | R;
+}
+
+// layerExImage's gaussianBlur, one pass: along rows (vertical 0: image clip -> temp) or columns
+// (1: temp -> image clip). The weights are the plug-in's matrix; at the edges only the weights
+// inside the clip count, scaled to one, as the plug-in's blur_line does.
+struct BlurParams {
+    uint pitch;                    // the image's, in pixels
+    uint left, top, width, height; // the clip; the temp buffer is width x height
+    uint length;                   // matrix length (odd)
+    uint vertical;
+};
+kernel void shioriGaussianBlur(device uint *img [[buffer(0)]],
+                               device uint *tmp [[buffer(1)]],
+                               device const float *matrix [[buffer(2)]],
+                               constant BlurParams &p [[buffer(3)]],
+                               uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= p.width || gid.y >= p.height) return;
+    const int mid = int(p.length / 2);
+    const int n = p.vertical ? int(p.height) : int(p.width);
+    const int at = p.vertical ? int(gid.y) : int(gid.x);
+    float4 sum = 0;
+    float scale = 0;
+    for (int j = 0; j < int(p.length); ++j) {
+        const int k = at + j - mid;
+        if (k < 0 || k >= n) continue;
+        uint v = p.vertical ? tmp[uint(k) * p.width + gid.x] : img[(p.top + gid.y) * p.pitch + p.left + uint(k)];
+        sum += matrix[j] * float4(v & 0xffu, (v >> 8) & 0xffu, (v >> 16) & 0xffu, v >> 24);
+        scale += matrix[j];
+    }
+    uint4 c = uint4(clamp(0.5f + sum / scale, 0.0f, 255.0f));
+    const uint out = (c.w << 24) | (c.z << 16) | (c.y << 8) | c.x;
+    if (p.vertical) img[(p.top + gid.y) * p.pitch + p.left + gid.x] = out;
+    else tmp[gid.y * p.width + gid.x] = out;
+}
 )MSL";
 
 } // namespace shiori::metal

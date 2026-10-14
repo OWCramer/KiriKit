@@ -21,6 +21,24 @@ void flush();
 /// `target` within the clip; false when either image isn't this renderer's (the CPU does it).
 bool rasterCopy(iTVPTexture2D *target, iTVPTexture2D *source, int left, int top, int width, int height, const int *offsets);
 
+/// One of layerExImage's per-pixel operations on a rectangle of one of this renderer's images
+/// (pixels R, G, B, A): 1 a lookup table on R, G and B (`lut`), 2 colorize (i0 hue, i1
+/// saturation, i2/i3 the blend's weights out of 256, f0 1 for a full blend), 3 modulate (f0 hue
+/// turns, f1 saturation, f2 luminance, -1..1), 4 noise (i0 level), 5 white noise. False when the
+/// image isn't this renderer's or the rectangle isn't inside it (the CPU does it).
+struct ImageOp {
+    unsigned op = 0;
+    int left = 0, top = 0, width = 0, height = 0;
+    int i[4] = {};
+    float f[3] = {};
+    unsigned seed = 0;
+    unsigned char lut[256] = {};
+};
+bool imageOp(iTVPTexture2D *texture, const ImageOp &op);
+
+/// layerExImage's gaussianBlur on a rectangle: rows, then columns, with the plug-in's weights.
+bool gaussianBlur(iTVPTexture2D *texture, int left, int top, int width, int height, const float *matrix, int length);
+
 /// Seconds the CPU has waited for the GPU in all (for slow-tick lines).
 double gpuWaitSeconds();
 

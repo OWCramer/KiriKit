@@ -68,6 +68,7 @@ struct Device {
     id<MTLCommandQueue> queue = nil;
     id<MTLComputePipelineState> pipeline = nil;
     id<MTLComputePipelineState> rasterPipeline = nil;
+    id<MTLComputePipelineState> imagePipeline = nil, blurPipeline = nil;
     id<MTLBuffer> ooo = nil, negmul = nil;
     NSUInteger linearAlignment = 64;
 
@@ -99,6 +100,8 @@ struct Device {
         pipeline = [device newComputePipelineStateWithFunction:function error:&error];
         if (!pipeline) return false;
         rasterPipeline = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"shioriRasterCopy"] error:&error];
+        imagePipeline = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"shioriImageOp"] error:&error];
+        blurPipeline = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"shioriGaussianBlur"] error:&error];
         linearAlignment = std::max<NSUInteger>(64, [device minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatRGBA8Unorm]);
         return true;
     }
@@ -308,8 +311,9 @@ id<MTLBuffer> newImageBuffer(size_t capacity, bool clear) {
 
 class Texture final : public iTVPTexture2D {
 public:
-    Texture(unsigned w, unsigned h, TVPTextureFormat::e format) : iTVPTexture2D(w, h), Format(format) {
-        Allocate(w, h);
+    // `clear` false: the caller fills every pixel (a reused buffer then isn't cleared first).
+    Texture(unsigned w, unsigned h, TVPTextureFormat::e format, bool clear = true) : iTVPTexture2D(w, h), Format(format) {
+        Allocate(w, h, clear);
     }
     // Queued work keeps the buffer alive (command buffers retain what they use).
     ~Texture() override {
@@ -468,10 +472,10 @@ private:
         size_t bytes = size_t(std::max(w, 1u)) * BytesPerPixel();
         return (bytes + a - 1) / a * a;
     }
-    void Allocate(unsigned w, unsigned h) {
+    void Allocate(unsigned w, unsigned h, bool clear = true) {
         Pitch = tjs_int(AlignedPitch(w));
         Capacity = size_t(Pitch) * std::max(h, 1u);
-        Storage = newImageBuffer(Capacity, true);
+        Storage = newImageBuffer(Capacity, clear);
         Bytes = static_cast<uint8_t *>(Storage.contents);
         totalBytes() += Capacity;
     }
@@ -655,7 +659,7 @@ public:
 
     iTVPTexture2D *CreateTexture2D(const void *pixel, int pitch, unsigned int w, unsigned int h,
                                    TVPTextureFormat::e format, int flags) override {
-        auto *t = new Texture(w, h, format == TVPTextureFormat::Gray ? TVPTextureFormat::Gray : format);
+        auto *t = new Texture(w, h, format == TVPTextureFormat::Gray ? TVPTextureFormat::Gray : format, !(pixel && pitch));
         if (pixel && pitch) {
             const uint8_t *src = static_cast<const uint8_t *>(pixel);
             size_t line = std::min<size_t>(size_t(std::abs(pitch)), size_t(w) * t->BytesPerPixel());
@@ -667,7 +671,7 @@ public:
 
     iTVPTexture2D *CreateTexture2D(tTVPBitmap *bmp) override {
         bool gray = bmp->GetBPP() == 8;
-        auto *t = new Texture(bmp->GetWidth(), bmp->GetHeight(), gray ? TVPTextureFormat::Gray : TVPTextureFormat::RGBA);
+        auto *t = new Texture(bmp->GetWidth(), bmp->GetHeight(), gray ? TVPTextureFormat::Gray : TVPTextureFormat::RGBA, false);
         size_t line = size_t(bmp->GetWidth()) * (gray ? 1 : 4);
         const uint8_t *src = static_cast<const uint8_t *>(bmp->GetBits());
         for (unsigned y = 0; y < bmp->GetHeight(); ++y)
@@ -680,7 +684,8 @@ public:
 
     iTVPTexture2D *CreateTexture2D(unsigned int neww, unsigned int newh, iTVPTexture2D *tex) override {
         auto *t = new Texture(neww, newh, tex->GetFormat() == TVPTextureFormat::Gray ? TVPTextureFormat::Gray
-                                                                                  : TVPTextureFormat::RGBA);
+                                                                                  : TVPTextureFormat::RGBA,
+                              neww > tex->GetWidth() || newh > tex->GetHeight());
         unsigned w = std::min(neww, tex->GetWidth()), h = std::min(newh, tex->GetHeight());
         if (w && h) {
             Texture *from = ours(tex);
@@ -1473,6 +1478,72 @@ bool rasterCopy(iTVPTexture2D *target, iTVPTexture2D *source, int left, int top,
     ++g.dispatches;
     src->MarkUsed(serial);
     tar->MarkWritten(serial);
+    return true;
+}
+
+// layerExImage's operations (shioriImageOp, shioriGaussianBlur): the clip must lie in the image.
+static Texture *imageForOp(iTVPTexture2D *texture, int left, int top, int width, int height) {
+    Texture *t = ours(texture);
+    if (!t || t->BytesPerPixel() != 4 || left < 0 || top < 0 || width <= 0 || height <= 0) return nullptr;
+    if (unsigned(left + width) > t->GetWidth() || unsigned(top + height) > t->GetHeight()) return nullptr;
+    return t;
+}
+
+bool imageOp(iTVPTexture2D *texture, const ImageOp &op) {
+    Texture *t = imageForOp(texture, op.left, op.top, op.width, op.height);
+    Device &g = gpu();
+    if (!t || !g.imagePipeline) return false;
+    std::lock_guard<std::recursive_mutex> lock(g.mutex);
+    uint64_t serial = 0;
+    id<MTLCommandBuffer> commands = g.bareCommandBuffer(serial);
+    id<MTLComputeCommandEncoder> e = [commands computeCommandEncoder];
+    [e setComputePipelineState:g.imagePipeline];
+    [e setBuffer:t->Buffer() offset:0 atIndex:0];
+    uint8_t lut[256];
+    memcpy(lut, op.lut, 256);
+    [e setBytes:lut length:256 atIndex:1];
+    struct {
+        uint32_t pitch, left, top, width, height, op;
+        int32_t i0, i1, i2, i3;
+        float f0, f1, f2;
+        uint32_t seed;
+    } p = {uint32_t(t->GetPitch() / 4), uint32_t(op.left), uint32_t(op.top), uint32_t(op.width), uint32_t(op.height), op.op,
+           op.i[0], op.i[1], op.i[2], op.i[3], op.f[0], op.f[1], op.f[2], op.seed};
+    [e setBytes:&p length:sizeof(p) atIndex:2];
+    [e dispatchThreads:MTLSizeMake(op.width, op.height, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+    [e endEncoding];
+    ++g.dispatches;
+    t->MarkWritten(serial);
+    return true;
+}
+
+bool gaussianBlur(iTVPTexture2D *texture, int left, int top, int width, int height, const float *matrix, int length) {
+    Texture *t = imageForOp(texture, left, top, width, height);
+    Device &g = gpu();
+    if (!t || !g.blurPipeline || length <= 0) return false;
+    std::lock_guard<std::recursive_mutex> lock(g.mutex);
+    uint64_t serial = 0;
+    id<MTLCommandBuffer> commands = g.bareCommandBuffer(serial);
+    const size_t tempBytes = size_t(width) * size_t(height) * 4;
+    id<MTLBuffer> temp = newImageBuffer(tempBytes, false);
+    id<MTLBuffer> weights = [g.device newBufferWithBytes:matrix length:size_t(length) * sizeof(float)
+                                                 options:MTLResourceStorageModeShared];
+    for (uint32_t vertical = 0; vertical < 2; ++vertical) {
+        id<MTLComputeCommandEncoder> e = [commands computeCommandEncoder];
+        [e setComputePipelineState:g.blurPipeline];
+        [e setBuffer:t->Buffer() offset:0 atIndex:0];
+        [e setBuffer:temp offset:0 atIndex:1];
+        [e setBuffer:weights offset:0 atIndex:2];
+        struct {
+            uint32_t pitch, left, top, width, height, length, vertical;
+        } p = {uint32_t(t->GetPitch() / 4), uint32_t(left), uint32_t(top), uint32_t(width), uint32_t(height), uint32_t(length), vertical};
+        [e setBytes:&p length:sizeof(p) atIndex:3];
+        [e dispatchThreads:MTLSizeMake(width, height, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+        [e endEncoding];
+        ++g.dispatches;
+    }
+    bufferPool().give(temp, tempBytes, serial);
+    t->MarkWritten(serial);
     return true;
 }
 
