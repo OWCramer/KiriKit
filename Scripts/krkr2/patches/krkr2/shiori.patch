@@ -1,5 +1,5 @@
 diff --git a/cpp/core/base/EventIntf.cpp b/cpp/core/base/EventIntf.cpp
-index a172e1d..9e12d29 100644
+index a172e1d..bce7f32 100644
 --- a/cpp/core/base/EventIntf.cpp
 +++ b/cpp/core/base/EventIntf.cpp
 @@ -12,6 +12,23 @@
@@ -83,19 +83,27 @@ index a172e1d..9e12d29 100644
  
  static void TVPDestroyContinuousHandlerVector() {
      std::vector<tTJSVariantClosure>::iterator i;
-@@ -976,6 +1017,12 @@ void TVPDeliverCompactEvent(tjs_int level) {
+@@ -976,7 +1017,20 @@ void TVPDeliverCompactEvent(tjs_int level) {
              }
          }
      }
 +#ifdef SHIORIKRKR
-+    // Not on the idle compaction (every 4 s with no continuous handler): saving the system
-+    // variables writes the game's whole system file, a long frame each time. The app saves
-+    // them when it leaves the screen or the game, and the games save them at their own points.
-+    if(level != TVP_COMPACT_LEVEL_IDLE)
-+#endif
++    // The idle compaction (every 4 s with no continuous handler) saves them at most once a
++    // minute: saving the system variables writes the game's whole system file (a long frame as
++    // the read-text record grows). The app also saves them when it leaves the screen or the game.
++    static tjs_uint64 lastIdleSave = 0;
++    const tjs_uint64 now = TVPGetTickCount();
++    if(level != TVP_COMPACT_LEVEL_IDLE || !lastIdleSave || now - lastIdleSave >= 60000) {
++        if(level == TVP_COMPACT_LEVEL_IDLE)
++            lastIdleSave = now;
++        TVPDoSaveSystemVariables();
++    }
++#else
      TVPDoSaveSystemVariables();
++#endif
  #if 0
      if( level >= TVP_COMPACT_LEVEL_MAX && TVPEnableGlobalHeapCompaction )
+     {	// Do compact CRT and Global Heap
 diff --git a/cpp/core/base/ScriptMgnIntf.cpp b/cpp/core/base/ScriptMgnIntf.cpp
 index 757f829..cf0378a 100644
 --- a/cpp/core/base/ScriptMgnIntf.cpp

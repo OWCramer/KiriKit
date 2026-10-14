@@ -77,7 +77,10 @@ public:
     }
     bool IsPlaying() override { return Playing; }
 
-    void SetVolume(float v) override { Volume = v; }
+    void SetVolume(float v) override {
+        if (tracing() && std::abs(v - Volume.load()) > 0.001f) trace("volume " + std::to_string(v));
+        Volume = v;
+    }
     float GetVolume() override { return Volume; }
     void SetPan(float v) override { Pan = std::clamp(v, -1.0f, 1.0f); }
     float GetPan() override { return Pan; }
