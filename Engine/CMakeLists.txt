@@ -159,11 +159,11 @@ shiori_plugin(layerExDraw layerExDraw.dll "${SDL3PLUGINS}/LayerExDraw" LayerExDr
 # ---- Shiori's environment (replaces krkr2's cocos2d-x one) ----
 file(GLOB SHIORI_ENVIRON_SOURCES CONFIGURE_DEPENDS "${HERE}/environ/*.cpp" "${HERE}/environ/*.mm")
 
-set(SHIORI_SOURCES "${HERE}/shiorikrkr_host.mm" "${HERE}/cx_decrypt.cpp" "${HERE}/nekoworks.cpp" "${HERE}/cursor_decode.mm"
+set(SHIORI_SOURCES "${HERE}/shiorikrkr_host.mm" "${HERE}/cx_decrypt.cpp" "${HERE}/shiori_hx.cpp" "${HERE}/shiori_hx_link.cpp" "${HERE}/nekoworks.cpp" "${HERE}/cursor_decode.mm"
     "${HERE}/render/shiori_metal_render.mm" "${HERE}/render/shiori_layer_gpu.cpp" "${HERE}/shiorikrkr_movie.cpp")
 set(SOURCES ${SHIORI_SOURCES} ${PARSERS} "${GEN}/tjsDateWordMap.inc" ${TJS2_SOURCES} ${BASE_SOURCES} ${VISUAL_SOURCES}
     ${SOUND_SOURCES} ${UTILS_SOURCES} ${OTHER_CORE_SOURCES} ${SHIORI_ENVIRON_SOURCES}
-    ${KRKR2_PLUGIN_SOURCES} ${PLUGIN_SOURCES} "${HERE}/getlangname.cpp" "${HERE}/plugins/shiori_steam.cpp" "${HERE}/plugins/shiori_gamepad.cpp" "${HERE}/shiori_plugin_links.cpp"
+    ${KRKR2_PLUGIN_SOURCES} ${PLUGIN_SOURCES} "${HERE}/getlangname.cpp" "${HERE}/plugins/shiori_steam.cpp" "${HERE}/plugins/shiori_gamepad.cpp" "${HERE}/plugins/shiori_windows_standins.cpp" "${HERE}/shiori_plugin_links.cpp"
     "${HERE}/shiorikrkr_emote.cpp" "${HERE}/shiorikrkr_motion.cpp" "${HERE}/shiorikrkr_motionplayer.cpp" "${HERE}/shiorikrkr_psbfile.cpp" "${HERE}/datapack.cpp" "${HERE}/shiori_prefetch.cpp"
     "${HERE}/plugins/shiori_textrender.cpp")
 
