@@ -122,6 +122,9 @@ int main(int argc, char **argv) {
         std::multimap<int, std::pair<int, int>> keyChanges;
         // --swipe FRAME:X0,Y0,X1,Y1: a finger dragged across over 10 ticks (touch and pointer, as the app sends)
         std::multimap<int, std::array<float, 4>> swipes;
+        // --tap FRAME:X,Y: a quick finger tap, touch and pointer down and up all before one tick (as a
+        // tap shorter than a frame reaches the app)
+        std::multimap<int, std::pair<float, float>> taps;
         std::multimap<int, float> wheels; // --wheel FRAME:DY (a notch up is 1, at the centre)
         std::multimap<int, std::string> evals, captures;
         std::vector<std::string> options;
@@ -159,6 +162,11 @@ int main(int argc, char **argv) {
             } else if (a == "--wheel") {
                 auto [frame, rest] = split(next());
                 wheels.emplace(frame, float(std::atof(rest.c_str())));
+            } else if (a == "--tap") {
+                auto [frame, rest] = split(next());
+                float x = 0, y = 0;
+                std::sscanf(rest.c_str(), "%f,%f", &x, &y);
+                taps.emplace(frame, std::make_pair(x, y));
             } else if (a == "--swipe") {
                 auto [frame, rest] = split(next());
                 std::array<float, 4> v{};
@@ -282,6 +290,14 @@ int main(int argc, char **argv) {
             for (auto it = wheels.lower_bound(frame); it != wheels.upper_bound(frame); ++it) {
                 std::printf("== frame %d: wheel %.1f\n", frame, it->second);
                 shiorikrkr_wheel(it->second, 0.5f, 0.5f);
+            }
+            for (auto it = taps.lower_bound(frame); it != taps.upper_bound(frame); ++it) {
+                const float x = it->second.first, y = it->second.second;
+                std::printf("== frame %d: tap %.3f,%.3f\n", frame, x, y);
+                shiorikrkr_touch(0, x, y, 1);
+                shiorikrkr_pointer(SHIORIKRKR_POINTER_DOWN, x, y, SHIORIKRKR_BUTTON_LEFT);
+                shiorikrkr_touch(2, x, y, 1);
+                shiorikrkr_pointer(SHIORIKRKR_POINTER_UP, x, y, SHIORIKRKR_BUTTON_LEFT);
             }
             for (auto it = swipes.lower_bound(frame); it != swipes.upper_bound(frame); ++it) {
                 const auto &v = it->second;
