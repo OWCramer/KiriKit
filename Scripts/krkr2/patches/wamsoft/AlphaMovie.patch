@@ -1,8 +1,8 @@
 diff --git a/AlphaMovie.cpp b/AlphaMovie.cpp
-index a108d51..839252c 100644
+index a108d51..d9e3153 100644
 --- a/AlphaMovie.cpp
 +++ b/AlphaMovie.cpp
-@@ -30,7 +30,11 @@
+@@ -30,7 +30,17 @@
  
  #include <math.h>
  #include <string.h>
@@ -11,10 +11,16 @@ index a108d51..839252c 100644
  #include <vector>
 +#include <chrono>
 +#include <future>
++#include <deque>
++#include <mutex>
++#include <memory>
++#include <thread>
++#include <condition_variable>
++#include <algorithm>
  
  //---------------------------------------------------------------------------
  // リトルエンディアン読み出しヘルパ
-@@ -151,7 +155,7 @@ struct HuffTable {
+@@ -151,7 +161,7 @@ struct HuffTable {
  	}
  };
  
@@ -23,7 +29,7 @@ index a108d51..839252c 100644
  struct BitReader {
  	const tjs_uint8 *p, *end;
  	tjs_uint32 acc;   // 現在のバイトのビット
-@@ -161,13 +165,10 @@ struct BitReader {
+@@ -161,13 +171,10 @@ struct BitReader {
  	inline int bit() {
  		if (cnt == 0) {
  			if (p >= end) return 0;         // データ枯渇時は 0 で埋める
@@ -41,7 +47,7 @@ index a108d51..839252c 100644
  		}
  		cnt--;
  		return (acc >> cnt) & 1;
-@@ -207,23 +208,45 @@ static void initCos() {
+@@ -207,23 +214,45 @@ static void initCos() {
  }
  
  // 自然順の逆量子化済み係数 coef[64] → 空間 8x8 (レベルシフト +128 / クランプ)
@@ -94,7 +100,7 @@ index a108d51..839252c 100644
  		}
  	}
  }
-@@ -336,6 +359,12 @@ static bool getLayerWriteBuffer(iTJSDispatch2 *lay, tjs_int &w, tjs_int &h,
+@@ -336,6 +365,12 @@ static bool getLayerWriteBuffer(iTJSDispatch2 *lay, tjs_int &w, tjs_int &h,
  	return (ptr != 0 && w > 0 && h > 0 && pitch != 0);
  }
  
@@ -107,32 +113,86 @@ index a108d51..839252c 100644
  //---------------------------------------------------------------------------
  // AlphaMovie クラス本体
  //---------------------------------------------------------------------------
-@@ -358,7 +387,23 @@ public:
+@@ -358,7 +393,77 @@ public:
  
  	//----------------------------------------------------------- ストレージ操作
  	void closeStream() {
 -		if (Stream) { Stream->Destruct(); Stream = 0; }
-+		dropAhead();
++		dropAhead(true);
++		LastShown = -1;
++		Step = 1;
 +		if (Stream) { delete Stream; Stream = 0; }
 +	}
 +
-+	// The next frame is decoded on another thread while the game shows this one (a full-screen
-+	// frame takes several milliseconds), so showNextImage mostly only copies.
++	// The next frames are decoded on other threads while the game shows this one (a full-screen
++	// frame takes several milliseconds, a large one more than a frame's time), each frame on a
++	// thread of its own, so showNextImage mostly only copies.
 +	struct Decoded {
 +		std::vector<tjs_uint8> pixels;
 +		tjs_int left = 0, top = 0, width = 0, height = 0;
 +	};
-+	std::future<Decoded> Ahead;
-+	tjs_int AheadIndex = -1;
-+	void dropAhead() {
-+		if (Ahead.valid()) {
-+			try { Ahead.get(); } catch (...) {}
++	// A frame being decoded on a thread of its own; dropping it doesn't wait for it (a game that
++	// seeks by time moves on often), only closing the stream waits for every one.
++	struct Job {
++		std::mutex m;
++		std::condition_variable cv;
++		bool done = false, failed = false;
++		Decoded d;
++	};
++	struct AheadFrame {
++		tjs_int index;
++		std::shared_ptr<Job> job;
++	};
++	static constexpr size_t kAheadFrames = 3;
++	std::deque<AheadFrame> Ahead;
++	std::mutex StreamLock; // the frames' reads share the stream
++	std::mutex RunLock;
++	std::condition_variable RunDone;
++	int Running = 0;
++	tjs_int LastShown = -1, Step = 1; // the game's step between frames shown (seeking by time)
++	void launch(tjs_int index) {
++		auto job = std::make_shared<Job>();
++		{
++			std::lock_guard<std::mutex> lock(RunLock);
++			++Running;
 +		}
-+		AheadIndex = -1;
++		std::thread([this, job, index] {
++			try {
++				decodeFrame(index, job->d.pixels, job->d.left, job->d.top, job->d.width, job->d.height);
++			} catch (...) {
++				job->failed = true;
++			}
++			{
++				std::lock_guard<std::mutex> lock(job->m);
++				job->done = true;
++			}
++			job->cv.notify_all();
++			std::lock_guard<std::mutex> lock(RunLock);
++			if (--Running == 0) RunDone.notify_all();
++		}).detach();
++		Ahead.push_back({index, job});
++	}
++	// `wait`: until no frame is being decoded (the stream or the frame list is about to change).
++	void dropAhead(bool wait = false) {
++		Ahead.clear();
++		if (wait) {
++			std::unique_lock<std::mutex> lock(RunLock);
++			RunDone.wait(lock, [&] { return Running == 0; });
++		}
++	}
++	// The frame `steps` steps after `index` in playing order (-1 when there's none).
++	tjs_int frameAfter(tjs_int index, tjs_int steps = 1) const {
++		const tjs_int count = (tjs_int)Frames.size();
++		tjs_int next = index + steps;
++		if (next >= count) {
++			if (!(Loop && NextMovieFile.length() == 0) || count == 0) return -1;
++			next %= count;
++		}
++		return next;
  	}
  
  	// amv を開く
-@@ -482,14 +527,40 @@ public:
+@@ -482,14 +587,57 @@ public:
  			}
  		}
  
@@ -143,14 +203,27 @@ index a108d51..839252c 100644
 -		blitToLayer(layer, bgra, fleft, ftop, fw, fh);
 +		Decoded frame;
 +		const auto decodeStart = std::chrono::steady_clock::now();
-+		const bool ready = AheadIndex == CurrentIndex && Ahead.valid();
-+		if (ready) {
-+			frame = Ahead.get();
-+			AheadIndex = -1;
-+		} else {
-+			dropAhead();
++		// The frame from the queue (those before it are passed over), else decoded now.
++		bool ready = false;
++		while (!Ahead.empty()) {
++			AheadFrame a = Ahead.front();
++			Ahead.pop_front();
++			if (a.index != CurrentIndex) continue;
++			std::unique_lock<std::mutex> lock(a.job->m);
++			a.job->cv.wait(lock, [&] { return a.job->done; });
++			if (!a.job->failed) {
++				frame = std::move(a.job->d);
++				ready = true;
++			}
++			break;
++		}
++		if (!ready) {
++			Ahead.clear();
 +			decodeFrame(CurrentIndex, frame.pixels, frame.left, frame.top, frame.width, frame.height);
 +		}
++		if (LastShown >= 0 && CurrentIndex > LastShown && CurrentIndex - LastShown <= 8) Step = CurrentIndex - LastShown;
++		else if (CurrentIndex != LastShown) Step = 1;
++		LastShown = CurrentIndex;
 +		if (traceFrames())
 +			fprintf(stderr, "amv frame %d %s in %.2f ms\n", (int)CurrentIndex, ready ? "taken" : "decoded",
 +					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - decodeStart).count());
@@ -164,29 +237,33 @@ index a108d51..839252c 100644
  
  		tjs_int ret = (tjs_int)Frames[CurrentIndex].number;
  		CurrentIndex++;
-+		// Decode the frame after this one meanwhile (the first again when it loops).
-+		tjs_int next = CurrentIndex;
-+		if (next >= (tjs_int)Frames.size()) next = (Loop && NextMovieFile.length() == 0) ? 0 : -1;
-+		if (next >= 0) {
-+			AheadIndex = next;
-+			Ahead = std::async(std::launch::async, [this, next] {
-+				Decoded d;
-+				decodeFrame(next, d.pixels, d.left, d.top, d.width, d.height);
-+				return d;
-+			});
++		// Decode the frames the game will show next meanwhile, a step apart as it has been
++		// showing them (the first again when it loops); the queue keeps those still ahead.
++		tjs_int next = frameAfter(LastShown, Step);
++		std::deque<AheadFrame> kept;
++		for (size_t i = 0; i < kAheadFrames && next >= 0; ++i) {
++			auto it = std::find_if(Ahead.begin(), Ahead.end(), [&](const AheadFrame &a) { return a.index == next; });
++			if (it != Ahead.end()) kept.push_back(*it);
++			else if (std::none_of(kept.begin(), kept.end(), [&](const AheadFrame &a) { return a.index == next; })) {
++				std::swap(Ahead, kept);
++				launch(next);
++				std::swap(Ahead, kept);
++			}
++			next = frameAfter(next, Step);
 +		}
++		Ahead = std::move(kept);
  		return ret;
  	}
  
-@@ -506,6 +577,7 @@ public:
+@@ -506,6 +654,7 @@ public:
  	tjs_int getNumOfFrame() const { return (tjs_int)NumOfFrame; }
  	tjs_int getFrame() const { return CurrentIndex; }
  	void    setFrame(tjs_int v) {
-+		dropAhead();
++		// (the frames decoding ahead stay: showNextImage takes the one asked for, if it's there)
  		if (Frames.empty()) { CurrentIndex = 0; return; }
  		if (v < 0) v = 0;
  		if (v >= (tjs_int)Frames.size()) v = (tjs_int)Frames.size() - 1;
-@@ -530,7 +602,7 @@ private:
+@@ -530,7 +679,7 @@ private:
  	//----------------------------------------------------------- フレーム情報
  	struct FrameInfo { tjs_int64 offset; tjs_uint32 number; };
  
@@ -195,7 +272,15 @@ index a108d51..839252c 100644
  	tjs_uint32 NumOfFrame;
  	tjs_int64  FirstFrameOfs;
  	tjs_uint16 Width, Height;
-@@ -576,7 +648,11 @@ private:
+@@ -567,6 +716,7 @@ private:
+ 	void decodeJpegAlpha(tjs_int64 ofs, std::vector<tjs_uint8> &bgra,
+ 						 tjs_int &fleft, tjs_int &ftop, tjs_int &fw, tjs_int &fh)
+ 	{
++		std::unique_lock<std::mutex> streamLock(StreamLock);
+ 		tjs_uint8 fh20[20];
+ 		seekRead(ofs, fh20, 20);
+ 		if (rdU32(fh20 + 0) != FRAM_MAGIC)
+@@ -576,7 +726,11 @@ private:
  		ftop  = rdS16(fh20 + 14);
  		fw    = rdU16(fh20 + 16);
  		fh    = rdU16(fh20 + 18);
@@ -208,7 +293,15 @@ index a108d51..839252c 100644
  			TVPThrowExceptionMessage(TJS_W("File format error."));
  
  		tjs_uint payloadLen = size - 12;
-@@ -616,9 +692,16 @@ private:
+@@ -585,6 +739,7 @@ private:
+ 			tjs_uint got = Stream->Read(&entropy[0], payloadLen);
+ 			if (got != payloadLen) TVPThrowExceptionMessage(TJS_W("AlphaMovie: read error."));
+ 		}
++		streamLock.unlock();
+ 
+ 		// 成分定義 (SOS 順 = Cb,Cr,Y,A)
+ 		std::vector<amvdec::Comp> comps(4);
+@@ -616,9 +771,16 @@ private:
  				int r = yy + ((91881  * (cr - 128)) >> 16);
  				int g = yy - ((22554  * (cb - 128) + 46802 * (cr - 128)) >> 16);
  				int b = yy + ((116130 * (cb - 128)) >> 16);
@@ -225,7 +318,15 @@ index a108d51..839252c 100644
  				dst[3] = (tjs_uint8)a;
  			}
  		}
-@@ -642,7 +725,11 @@ private:
+@@ -632,6 +794,7 @@ private:
+ 	void decodeZlibAlpha(tjs_int64 ofs, std::vector<tjs_uint8> &bgra,
+ 						 tjs_int &fleft, tjs_int &ftop, tjs_int &fw, tjs_int &fh)
+ 	{
++		std::unique_lock<std::mutex> streamLock(StreamLock);
+ 		tjs_uint8 fh24[24];
+ 		seekRead(ofs, fh24, 24);
+ 		if (rdU32(fh24 + 0) != FRAM_MAGIC)
+@@ -642,7 +805,11 @@ private:
  		fw    = rdU16(fh24 + 16);
  		fh    = rdU16(fh24 + 18);
  		tjs_uint32 alphaZlibLen  = rdU32(fh24 + 20);
@@ -238,7 +339,15 @@ index a108d51..839252c 100644
  			TVPThrowExceptionMessage(TJS_W("File format error."));
  
  		// alpha(zlib) が先
-@@ -695,9 +782,16 @@ private:
+@@ -659,6 +826,7 @@ private:
+ 			tjs_uint got = Stream->Read(&color[0], colorSize);
+ 			if (got != colorSize) TVPThrowExceptionMessage(TJS_W("AlphaMovie: read error."));
+ 		}
++		streamLock.unlock();
+ 
+ 		// 色 (Cb,Cr,Y 3 成分)
+ 		std::vector<amvdec::Comp> comps(3);
+@@ -695,9 +863,16 @@ private:
  				int r = yy + ((91881  * (cr - 128)) >> 16);
  				int g = yy - ((22554  * (cb - 128) + 46802 * (cr - 128)) >> 16);
  				int b = yy + ((116130 * (cb - 128)) >> 16);
@@ -255,7 +364,7 @@ index a108d51..839252c 100644
  				dst[3] = ar[x];
  			}
  		}
-@@ -709,11 +803,29 @@ private:
+@@ -709,11 +884,29 @@ private:
  	void blitToLayer(iTJSDispatch2 *layer, std::vector<tjs_uint8> &bgra,
  					 tjs_int fleft, tjs_int ftop, tjs_int fw, tjs_int fh)
  	{
