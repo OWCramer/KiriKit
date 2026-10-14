@@ -60,6 +60,19 @@ bool hxReadIndex(const HxScheme &scheme, const std::string &archiveName, const u
 /// each as U+5000 + group, low group first.
 std::u16string hxEntryName(uint64_t id);
 
+// The index's name hashes (published facts about Hx, written here from the algorithms'
+// specifications: see PROVENANCE.md). Both hash UTF-16LE text followed by "xp3hnp".
+/// SipHash-2-4 (Aumasson & Bernstein, reference specification) of `message` under `key`.
+uint64_t sipHash24(const uint8_t key[16], const uint8_t *message, size_t size);
+/// BLAKE2s-256, unkeyed (RFC 7693).
+std::array<uint8_t, 32> blake2s256(const uint8_t *message, size_t size);
+/// A directory's hash, upper-case hex of its 8 little-endian bytes: SipHash-2-4 with a zero
+/// key of the directory with its trailing slash ("image/sys/"); the root ("" or "/") hashes
+/// the constant alone.
+std::string hxDirectoryHash(const std::u16string &directory);
+/// A file name's hash (no directory), upper-case hex of BLAKE2s-256.
+std::string hxFileNameHash(const std::u16string &name);
+
 /// One entry's decryption, from its file key (GARbro's HxFilter).
 class HxFilter {
 public:

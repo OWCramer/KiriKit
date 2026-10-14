@@ -12,7 +12,11 @@
 #include "tjsCommHead.h"
 #include "XP3Archive.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
+#include <mutex>
+#include <unordered_map>
 
 namespace {
 
@@ -51,6 +55,7 @@ bool readIndex(const ttstr &archive, const tjs_uint8 *blob, tjs_uint size,
             member.Name = ttstr(entry.name.c_str());
             ++named;
         }
+        member.Hash = entry.directoryHash + entry.nameHash;
         member.Id = entry.id;
         member.Key = entry.key;
         members.push_back(std::move(member));
@@ -58,6 +63,38 @@ bool readIndex(const ttstr &archive, const tjs_uint8 *blob, tjs_uint size,
     if (hxLog)
         hxLog("ShioriKrkr: Hx index of " + name + ": " + std::to_string(entries.size()) + " members, " +
               std::to_string(named) + " with names");
+    return true;
+}
+
+// A normalized in-archive name's index hashes: its directory (with the trailing slash, or the
+// root) and its file name.
+bool hashName(const ttstr &name, std::string &hash) {
+    // Called for every name looked up in every auto path (often more than a hundred times for
+    // one name a game probes for), so both halves are cached: directories for the session,
+    // the file name for as long as the same one is asked again on this thread.
+    static std::mutex lock;
+    static std::unordered_map<std::u16string, std::string> directories;
+    thread_local std::u16string lastFile;
+    thread_local std::string lastFileHash;
+    const std::u16string full(reinterpret_cast<const char16_t *>(name.c_str()), size_t(name.GetLen()));
+    const size_t slash = full.rfind(u'/');
+    const std::u16string directory = slash == std::u16string::npos ? std::u16string() : full.substr(0, slash + 1);
+    const std::u16string file = slash == std::u16string::npos ? full : full.substr(slash + 1);
+    if (file.empty()) return false;
+    {
+        std::lock_guard<std::mutex> hold(lock);
+        auto found = directories.find(directory);
+        if (found == directories.end())
+            found = directories.emplace(directory, shiorikrkr::hxDirectoryHash(directory)).first;
+        hash = found->second;
+    }
+    if (file != lastFile) {
+        lastFile = file;
+        lastFileHash = shiorikrkr::hxFileNameHash(file);
+    }
+    hash += lastFileHash;
+    static const bool trace = std::getenv("SHIORIKRKR_TRACE_HX") != nullptr;
+    if (trace) fprintf(stderr, "hx: %s\n", name.AsStdString().c_str());
     return true;
 }
 
@@ -89,12 +126,14 @@ bool hxInstall(const CxScheme &scheme, void (*log)(const std::string &), std::st
     hxLog = log;
     TVPShioriHxReadIndex = readIndex;
     TVPShioriHxDecrypt = decrypt;
+    TVPShioriHxHashName = hashName;
     return true;
 }
 
 void hxUninstall() {
     TVPShioriHxReadIndex = nullptr;
     TVPShioriHxDecrypt = nullptr;
+    TVPShioriHxHashName = nullptr;
     state().reset();
 }
 
