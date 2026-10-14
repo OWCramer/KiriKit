@@ -117,6 +117,9 @@ int main(int argc, char **argv) {
         int sessions = 1; // --again: leave the game and start it again in the same process
         std::multimap<int, std::pair<float, float>> clicks;
         std::multimap<int, int> keys; // --key FRAME:VK (hex or decimal): pressed, then let go after a few ticks
+        // --keydown FRAME:VK / --keyup FRAME:VK: a key held from one tick to another (Ctrl held is
+        // KAG's skip, as the app's two-finger swipe latches it)
+        std::multimap<int, std::pair<int, int>> keyChanges;
         // --swipe FRAME:X0,Y0,X1,Y1: a finger dragged across over 10 ticks (touch and pointer, as the app sends)
         std::multimap<int, std::array<float, 4>> swipes;
         std::multimap<int, float> wheels; // --wheel FRAME:DY (a notch up is 1, at the centre)
@@ -150,6 +153,9 @@ int main(int argc, char **argv) {
             } else if (a == "--key") {
                 auto [frame, rest] = split(next());
                 keys.emplace(frame, int(std::strtol(rest.c_str(), nullptr, 0)));
+            } else if (a == "--keydown" || a == "--keyup") {
+                auto [frame, rest] = split(next());
+                keyChanges.emplace(frame, std::make_pair(int(std::strtol(rest.c_str(), nullptr, 0)), a == "--keydown" ? 1 : 0));
             } else if (a == "--wheel") {
                 auto [frame, rest] = split(next());
                 wheels.emplace(frame, float(std::atof(rest.c_str())));
@@ -290,6 +296,10 @@ int main(int argc, char **argv) {
                 }
                 shiorikrkr_touch(2, v[2], v[3], 1);
                 shiorikrkr_pointer(SHIORIKRKR_POINTER_UP, v[2], v[3], SHIORIKRKR_BUTTON_LEFT);
+            }
+            for (auto it = keyChanges.lower_bound(frame); it != keyChanges.upper_bound(frame); ++it) {
+                std::printf("== frame %d: key 0x%02X %s\n", frame, it->second.first, it->second.second ? "down" : "up");
+                shiorikrkr_key(it->second.first, it->second.second);
             }
             for (auto it = keys.lower_bound(frame); it != keys.upper_bound(frame); ++it) {
                 std::printf("== frame %d: key 0x%02X\n", frame, it->second);
