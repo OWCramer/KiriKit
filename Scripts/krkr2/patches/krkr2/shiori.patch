@@ -1545,7 +1545,7 @@ index 7919e4e..e111dfa 100644
      tjs_uint8 *inbuf = nullptr;
      tjs_uint8 *outbuf[4];
 diff --git a/cpp/core/visual/RenderManager.cpp b/cpp/core/visual/RenderManager.cpp
-index 5feb515..cd7cb90 100644
+index 5feb515..085f59b 100644
 --- a/cpp/core/visual/RenderManager.cpp
 +++ b/cpp/core/visual/RenderManager.cpp
 @@ -31,6 +31,23 @@ extern "C" {
@@ -1588,7 +1588,49 @@ index 5feb515..cd7cb90 100644
          ++_drawCount;
          assert(textures.size() == 1);
          for(int i = 0; i < textures.size(); ++i) {
-@@ -4739,6 +4758,7 @@ public:
+@@ -3537,8 +3556,16 @@ public:
+                 isDoubleEqual(dstpt[2].y, dstpt[5].y);
+ 
+             while(isSrcRect && isDstRect) {
++#ifdef SHIORIKRKR
++                // The target points are in pixel-centre space (pixel 0 covers -0.5 to 0.5;
++                // AffineBlt draws an image in place at -0.5 to width - 0.5): edges are half a
++                // pixel on.
++                tTVPRect dstrect(tjs_int(std::floor(dstpt[0].x + 1)), tjs_int(std::floor(dstpt[0].y + 1)),
++                                 tjs_int(std::floor(dstpt[5].x + 1)), tjs_int(std::floor(dstpt[5].y + 1)));
++#else
+                 tTVPRect dstrect(dstpt[0].x, dstpt[0].y, dstpt[5].x,
+                                  dstpt[5].y);
++#endif
+                 tTVPRect refrect(srcpt[0].x, srcpt[0].y, srcpt[5].x,
+                                  srcpt[5].y);
+                 if(dstrect.left > dstrect.right ||
+@@ -3601,12 +3628,24 @@ public:
+             sdata = (const uint8_t *)src->GetPixelData();
+ 
+             // upper-left, upper-right, bottom-right, bottom-left
++#ifdef SHIORIKRKR
++            // Pixel-centre space, as the target points and OpenCV's sampling are: the source
++            // rectangle's edges half a pixel up and left (adding one to the right and bottom
++            // shrank an image drawn in place by a pixel, leaving the last column and row bare).
++            cv::Point2f pts_src[] = {
++                cv::Point2f(srcpt[0].x - 0.5, srcpt[0].y - 0.5),
++                cv::Point2f(srcpt[1].x - 0.5, srcpt[1].y - 0.5),
++                cv::Point2f(srcpt[5].x - 0.5, srcpt[5].y - 0.5),
++                cv::Point2f(srcpt[2].x - 0.5, srcpt[2].y - 0.5),
++            };
++#else
+             cv::Point2f pts_src[] = {
+                 cv::Point2f(srcpt[0].x, srcpt[0].y),
+                 cv::Point2f(srcpt[1].x + 1, srcpt[1].y),
+                 cv::Point2f(srcpt[5].x + 1, srcpt[5].y + 1),
+                 cv::Point2f(srcpt[2].x, srcpt[2].y + 1),
+             };
++#endif
+             cv::Point2f pts_dst[] = {
+                 cv::Point2f(dstpt[0].x - rcclip.left, dstpt[0].y - rcclip.top),
+                 cv::Point2f(dstpt[1].x - rcclip.left, dstpt[1].y - rcclip.top),
+@@ -4739,6 +4778,7 @@ public:
                              const tTVPRect &rcclip,
                              const tTVPPointD *pttar /*quad*/,
                              const tRenderTexQuadArray &textures) override {

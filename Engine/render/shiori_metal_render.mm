@@ -966,11 +966,17 @@ private:
         // frame) is sampled where it really is when the stretch type filters, as KiriKiri's own
         // affine drawing does; krkr2's rectangle path would snap it to whole pixels, so it moved in
         // visible steps a few times a second.
+        //
+        // KiriKiri's coordinates: the source points are pixel edges (the rectangle's left, top,
+        // right and bottom), the target points are in pixel-centre space, where pixel (0, 0)
+        // covers (-0.5, -0.5)-(0.5, 0.5); AffineBlt puts an image drawn in place at -0.5 to
+        // width - 0.5. Half a pixel more makes them edges too.
         auto whole = [](double v) { return std::fabs(v - std::round(v)) < 0.01; };
-        const bool betweenPixels = StretchType != 0 && !(whole(dstpt[0].x) && whole(dstpt[0].y) && whole(dstpt[5].x) &&
-                                                         whole(dstpt[5].y));
+        const bool betweenPixels = StretchType != 0 && !(whole(dstpt[0].x + 0.5) && whole(dstpt[0].y + 0.5) &&
+                                                         whole(dstpt[5].x + 0.5) && whole(dstpt[5].y + 0.5));
         if (isSrcRect && isDstRect && !betweenPixels) {
-            tTVPRect dstrect(dstpt[0].x, dstpt[0].y, dstpt[5].x, dstpt[5].y);
+            tTVPRect dstrect(tjs_int(std::floor(dstpt[0].x + 1)), tjs_int(std::floor(dstpt[0].y + 1)),
+                             tjs_int(std::floor(dstpt[5].x + 1)), tjs_int(std::floor(dstpt[5].y + 1)));
             tTVPRect refrect(srcpt[0].x, srcpt[0].y, srcpt[5].x, srcpt[5].y);
             if (!(dstrect.left > dstrect.right || dstrect.top > dstrect.bottom || refrect.left > refrect.right ||
                   refrect.top > refrect.bottom)) {
@@ -1002,9 +1008,18 @@ private:
                         rcclip.bottom, tar->GetWidth(), tar->GetHeight());
             return false;
         }
-        // upper-left, upper-right, bottom-right, bottom-left
-        cv::Point2f ps[] = {cv::Point2f(srcpt[0].x, srcpt[0].y), cv::Point2f(srcpt[1].x + 1, srcpt[1].y),
-                            cv::Point2f(srcpt[5].x + 1, srcpt[5].y + 1), cv::Point2f(srcpt[2].x, srcpt[2].y + 1)};
+        static const bool traceWarp = getenv("SHIORIKRKR_TRACE_WARP") != nullptr;
+        if (traceWarp)
+            fprintf(stderr, "warp: %s src %ux%u (%.2f,%.2f)-(%.2f,%.2f) to (%.2f,%.2f) (%.2f,%.2f) (%.2f,%.2f) (%.2f,%.2f) clip %d,%d,%d,%d\n",
+                    m->GetName().c_str(), src->GetWidth(), src->GetHeight(), srcpt[0].x, srcpt[0].y, srcpt[5].x, srcpt[5].y,
+                    dstpt[0].x, dstpt[0].y, dstpt[1].x, dstpt[1].y, dstpt[5].x, dstpt[5].y, dstpt[2].x, dstpt[2].y,
+                    rcclip.left, rcclip.top, rcclip.right, rcclip.bottom);
+        // upper-left, upper-right, bottom-right, bottom-left, all in pixel-centre space (the
+        // kernel samples there): the source's edges half a pixel up and left. (krkr2 took the
+        // right and bottom edges for the last pixels and added one, so an image drawn in place
+        // was shrunk by a pixel and left the target's last column and row uncovered.)
+        cv::Point2f ps[] = {cv::Point2f(srcpt[0].x - 0.5, srcpt[0].y - 0.5), cv::Point2f(srcpt[1].x - 0.5, srcpt[1].y - 0.5),
+                            cv::Point2f(srcpt[5].x - 0.5, srcpt[5].y - 0.5), cv::Point2f(srcpt[2].x - 0.5, srcpt[2].y - 0.5)};
         cv::Point2f pd[] = {cv::Point2f(dstpt[0].x - rcclip.left, dstpt[0].y - rcclip.top),
                             cv::Point2f(dstpt[1].x - rcclip.left, dstpt[1].y - rcclip.top),
                             cv::Point2f(dstpt[5].x - rcclip.left, dstpt[5].y - rcclip.top),
