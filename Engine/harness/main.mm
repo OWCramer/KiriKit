@@ -119,6 +119,7 @@ int main(int argc, char **argv) {
         std::multimap<int, int> keys; // --key FRAME:VK (hex or decimal): pressed, then let go after a few ticks
         // --swipe FRAME:X0,Y0,X1,Y1: a finger dragged across over 10 ticks (touch and pointer, as the app sends)
         std::multimap<int, std::array<float, 4>> swipes;
+        std::multimap<int, float> wheels; // --wheel FRAME:DY (a notch up is 1, at the centre)
         std::multimap<int, std::string> evals, captures;
         std::vector<std::string> options;
         auto split = [](const std::string &s) {
@@ -149,6 +150,9 @@ int main(int argc, char **argv) {
             } else if (a == "--key") {
                 auto [frame, rest] = split(next());
                 keys.emplace(frame, int(std::strtol(rest.c_str(), nullptr, 0)));
+            } else if (a == "--wheel") {
+                auto [frame, rest] = split(next());
+                wheels.emplace(frame, float(std::atof(rest.c_str())));
             } else if (a == "--swipe") {
                 auto [frame, rest] = split(next());
                 std::array<float, 4> v{};
@@ -268,6 +272,10 @@ int main(int argc, char **argv) {
                 shiorikrkr_pointer(SHIORIKRKR_POINTER_DOWN, it->second.first, it->second.second, SHIORIKRKR_BUTTON_LEFT);
                 shiorikrkr_tick();
                 shiorikrkr_pointer(SHIORIKRKR_POINTER_UP, it->second.first, it->second.second, SHIORIKRKR_BUTTON_LEFT);
+            }
+            for (auto it = wheels.lower_bound(frame); it != wheels.upper_bound(frame); ++it) {
+                std::printf("== frame %d: wheel %.1f\n", frame, it->second);
+                shiorikrkr_wheel(it->second, 0.5f, 0.5f);
             }
             for (auto it = swipes.lower_bound(frame); it != swipes.upper_bound(frame); ++it) {
                 const auto &v = it->second;
