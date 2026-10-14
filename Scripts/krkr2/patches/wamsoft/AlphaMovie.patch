@@ -1,8 +1,30 @@
 diff --git a/AlphaMovie.cpp b/AlphaMovie.cpp
-index a108d51..0996fd3 100644
+index a108d51..1b28440 100644
 --- a/AlphaMovie.cpp
 +++ b/AlphaMovie.cpp
-@@ -358,7 +358,7 @@ public:
+@@ -30,6 +30,8 @@
+ 
+ #include <math.h>
+ #include <string.h>
++#include <stdlib.h>
++#include <stdio.h>
+ #include <vector>
+ 
+ //---------------------------------------------------------------------------
+@@ -336,6 +338,12 @@ static bool getLayerWriteBuffer(iTJSDispatch2 *lay, tjs_int &w, tjs_int &h,
+ 	return (ptr != 0 && w > 0 && h > 0 && pitch != 0);
+ }
+ 
++// SHIORIKRKR_TRACE_AMV: each decoded frame's header.
++static bool traceFrames() {
++	static const bool on = getenv("SHIORIKRKR_TRACE_AMV") != 0;
++	return on;
++}
++
+ //---------------------------------------------------------------------------
+ // AlphaMovie クラス本体
+ //---------------------------------------------------------------------------
+@@ -358,7 +366,7 @@ public:
  
  	//----------------------------------------------------------- ストレージ操作
  	void closeStream() {
@@ -11,7 +33,19 @@ index a108d51..0996fd3 100644
  	}
  
  	// amv を開く
-@@ -530,7 +530,7 @@ private:
+@@ -487,6 +495,11 @@ public:
+ 		decodeFrame(CurrentIndex, bgra, fleft, ftop, fw, fh);
+ 
+ 		blitToLayer(layer, bgra, fleft, ftop, fw, fh);
++		// The layer's pixels changed behind its back: it redraws (as Layer.update()).
++		{
++			tTJSVariant dummy;
++			layer->FuncCall(0, TJS_W("update"), 0, &dummy, 0, 0, layer);
++		}
+ 
+ 		tjs_int ret = (tjs_int)Frames[CurrentIndex].number;
+ 		CurrentIndex++;
+@@ -530,7 +543,7 @@ private:
  	//----------------------------------------------------------- フレーム情報
  	struct FrameInfo { tjs_int64 offset; tjs_uint32 number; };
  
@@ -20,3 +54,59 @@ index a108d51..0996fd3 100644
  	tjs_uint32 NumOfFrame;
  	tjs_int64  FirstFrameOfs;
  	tjs_uint16 Width, Height;
+@@ -576,7 +589,11 @@ private:
+ 		ftop  = rdS16(fh20 + 14);
+ 		fw    = rdU16(fh20 + 16);
+ 		fh    = rdU16(fh20 + 18);
+-		if ((fw & 0x0f) || (fh & 0x0f) || fw <= 0 || fh <= 0)
++		if (traceFrames())
++			fprintf(stderr, "amv frame at %lld: size %u num %u left %d top %d %dx%d (jpeg alpha)\n", (long long)ofs, size,
++					rdU32(fh20 + 8), (int)fleft, (int)ftop, (int)fw, (int)fh);
++		if (fw == 0 && fh == 0) { bgra.clear(); return; } // a frame with nothing in it
++		if ((fw & 0x0f) || (fh & 0x0f) || fw < 0 || fh < 0)
+ 			TVPThrowExceptionMessage(TJS_W("File format error."));
+ 
+ 		tjs_uint payloadLen = size - 12;
+@@ -642,7 +659,11 @@ private:
+ 		fw    = rdU16(fh24 + 16);
+ 		fh    = rdU16(fh24 + 18);
+ 		tjs_uint32 alphaZlibLen  = rdU32(fh24 + 20);
+-		if ((fw & 0x0f) || (fh & 0x0f) || fw <= 0 || fh <= 0)
++		if (traceFrames())
++			fprintf(stderr, "amv frame at %lld: size %u num %u left %d top %d %dx%d alpha %u\n", (long long)ofs, size,
++					rdU32(fh24 + 8), (int)fleft, (int)ftop, (int)fw, (int)fh, alphaZlibLen);
++		if (fw == 0 && fh == 0) { bgra.clear(); return; } // a frame with nothing in it
++		if ((fw & 0x0f) || (fh & 0x0f) || fw < 0 || fh < 0)
+ 			TVPThrowExceptionMessage(TJS_W("File format error."));
+ 
+ 		// alpha(zlib) が先
+@@ -709,11 +730,29 @@ private:
+ 	void blitToLayer(iTJSDispatch2 *layer, std::vector<tjs_uint8> &bgra,
+ 					 tjs_int fleft, tjs_int ftop, tjs_int fw, tjs_int fh)
+ 	{
++		// The layer holds the movie's whole screen (scripts hand in a fresh layer and read
++		// screenWidth/screenHeight for where to show it): it takes the movie's size first.
++		{
++			tTJSVariant w, h;
++			if (TJS_SUCCEEDED(layer->PropGet(0, TJS_W("imageWidth"), 0, &w, layer)) &&
++				TJS_SUCCEEDED(layer->PropGet(0, TJS_W("imageHeight"), 0, &h, layer)) &&
++				(w.AsInteger() != (tjs_int)Width || h.AsInteger() != (tjs_int)Height)) {
++				tTJSVariant args[2] = { tTJSVariant((tjs_int)Width), tTJSVariant((tjs_int)Height) };
++				tTJSVariant *argv[2] = { &args[0], &args[1] };
++				layer->FuncCall(0, TJS_W("setImageSize"), 0, 0, 2, argv, layer);
++				layer->FuncCall(0, TJS_W("setSizeToImageSize"), 0, 0, 0, 0, layer);
++			}
++		}
+ 		tjs_int lw, lh, pitch;
+ 		tjs_uint8 *lbuf;
+ 		if (!getLayerWriteBuffer(layer, lw, lh, lbuf, pitch))
+ 			TVPThrowExceptionMessage(TJS_W("AlphaMovie: target must be a Layer with image."));
+ 
++		// Each frame is a whole picture (intra-coded) whose content lies in its box; the
++		// rest of the layer is clear. (A frame with nothing in it clears the layer.)
++		for (tjs_int y = 0; y < lh; y++) memset(lbuf + (size_t)y * pitch, 0, (size_t)lw * 4);
++		if (fw <= 0 || fh <= 0 || bgra.empty()) return;
++
+ 		tjs_int dx0 = Left + fleft;
+ 		tjs_int dy0 = Top + ftop;
+ 
