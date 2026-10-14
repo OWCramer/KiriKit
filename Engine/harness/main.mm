@@ -284,7 +284,14 @@ int main(int argc, char **argv) {
                                 presented.height, (unsigned long long)presented.serial, presented.blank);
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            // On a 60 Hz schedule from the start (as a display link): frame N comes N/60 s in,
+            // however long the ticks took (so captures line up with another engine's).
+            {
+                static std::chrono::steady_clock::time_point origin;
+                if (frame == 0) origin = std::chrono::steady_clock::now();
+                const auto due = origin + std::chrono::microseconds(int64_t(frame + 1) * 1000000 / 60);
+                if (std::chrono::steady_clock::now() < due) std::this_thread::sleep_until(due);
+            }
         }
         std::printf("== ran %d frames\n", frame);
         shiorikrkr_stop();
