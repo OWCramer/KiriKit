@@ -9,8 +9,7 @@
 // E-mote player (shiorikrkr_emote_host_t), as D3DEmotePlayer's do (shiorikrkr_emote.cpp).
 // The constants' values are the plug-in's public interface, as the games' scripts use them.
 //
-// Motion.Player (the plain motion files, .mtn) is answered as an idle player for now: it
-// draws nothing (NEKOPARA's characters are all E-mote).
+// Motion.Player (the plain motion files, .mtn) goes to the same host player.
 #include "tjsCommHead.h"
 #include <ncbind.hpp>
 #include "tjsArray.h"
@@ -450,6 +449,13 @@ public:
     // draw(layer or adaptor): the character into the layer's image, through the affine the
     // game set (setDrawAffineTranslateMatrix).
     void draw(iTJSDispatch2 *target) {
+        static int traced = 0;
+        if (getenv("SHIORIKRKR_TRACE_EMOTE") && traced++ < 20) {
+            char line[160];
+            snprintf(line, sizeof line, "E-mote draw call %p: adaptor %d ensure %d", (void *)this,
+                     target && ncbInstanceAdaptor<ShioriD3DAdaptor>::GetNativeInstance(target) != nullptr, ensure() ? 1 : 0);
+            TVPAddLog(ttstr(line));
+        }
         if (auto *canvas = target ? ncbInstanceAdaptor<ShioriD3DAdaptor>::GetNativeInstance(target) : nullptr) {
             if (!ensure() || !host() || !canvas->width() || !canvas->height()) return;
             if (canvas->texture()) {
@@ -746,10 +752,11 @@ private:
 
 NCB_REGISTER_SUBCLASS(ShioriLayerEmotePlayer) { SHIORI_LAYER_EMOTE_METHODS; }
 
-// Motion.Player: plain motions (.mtn). Idle for now; scripts go on.
+// Motion.Player: plain motions (.mtn), played and drawn by the host as E-mote models are (a
+// motion file is the same PSB without the mesh).
 class ShioriLayerMotionPlayer : public ShioriLayerEmotePlayer {
 public:
-    explicit ShioriLayerMotionPlayer(ShioriMotionResources *) : ShioriLayerEmotePlayer(nullptr) {}
+    explicit ShioriLayerMotionPlayer(ShioriMotionResources *resources) : ShioriLayerEmotePlayer(resources) {}
     tTJSVariant getOnAction() { return onAction_; }
     void setOnAction(tTJSVariant v) { onAction_ = v; }
     tTJSVariant getTags() { return stringArray({}); }
@@ -779,6 +786,10 @@ NCB_REGISTER_SUBCLASS(ShioriLayerMotionPlayer) {
 // draws straight into layers, so this keeps the last layer it was given.
 void ShioriD3DAdaptor::captureCanvas(iTJSDispatch2 *target) {
     tTJSNI_BaseLayer *layer = layerOf(target);
+    static int traced = 0;
+    if (getenv("SHIORIKRKR_TRACE_EMOTE") && traced++ < 10)
+        fprintf(stderr, "D3DAdaptor captureCanvas into %p (%dx%d)\n", (void *)layer, layer ? int(layer->GetImageWidth()) : -1,
+                layer ? int(layer->GetImageHeight()) : -1);
     if (!layer || !width_ || !height_) return;
     if (int(layer->GetImageWidth()) != width_ || int(layer->GetImageHeight()) != height_)
         layer->SetImageSize(width_, height_);

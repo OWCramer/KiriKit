@@ -114,6 +114,8 @@ public final class KrkrEmotePlayer {
         other.controllers = controllers
         other.controlScales = controlScales
         other.wind = wind
+        other.motionPlay = motionPlay
+        for (a, b) in zip(other.renderers, renderers) { a.object = b.object; a.motion = b.motion }
         return other
     }
 
@@ -173,8 +175,48 @@ public final class KrkrEmotePlayer {
     /// What the game reads back: the variable as set (moving included).
     public func variable(_ name: String) -> Double { currentVariable(name) }
 
+    /// A plain motion file's motion playing by name (Motion.Player): object, motion, when it
+    /// started on the clock.
+    private(set) var motionPlay: (object: String, motion: String, start: Double)?
+
+    /// Where the playing motion is (frames), looping or holding its last frame as it says.
+    var motionTime: Double {
+        guard let m = motionPlay, let motion = models.first?.objects[m.object]?[m.motion] else { return 0 }
+        var t = clock - m.start
+        if motion.lastTime > 0, t > motion.lastTime {
+            if motion.loopTime >= 0, motion.lastTime > motion.loopTime {
+                t = motion.loopTime + (t - motion.loopTime).truncatingRemainder(dividingBy: motion.lastTime - motion.loopTime)
+            } else {
+                // Held on its last frame: the keys at lastTime itself end the layers.
+                t = max(0, motion.lastTime - 0.001)
+            }
+        }
+        return t
+    }
+
+    /// Whether the playing motion has frames still to come (one that loops never ends).
+    private var motionRunning: Bool {
+        guard let m = motionPlay, let motion = models.first?.objects[m.object]?[m.motion] else { return false }
+        return motion.loopTime >= 0 || clock - m.start < motion.lastTime
+    }
+
+    /// Plays `label` as one of the model's motions (the base object's first, else any
+    /// object's), as Motion.Player.play does for a plain motion file. False when there is none.
+    private func playMotion(_ label: String) -> Bool {
+        guard let model = models.first else { return false }
+        let object = model.objects[model.baseObject]?[label] != nil ? model.baseObject
+            : model.objects.keys.sorted().first { model.objects[$0]?[label] != nil }
+        guard let object else { return false }
+        motionPlay = (object, label, clock)
+        for r in renderers { r.object = object; r.motion = label }
+        return true
+    }
+
     public func play(_ label: String, flags: Int) {
-        guard let t = timeline(label) else { return }
+        guard let t = timeline(label) else {
+            _ = playMotion(label)
+            return
+        }
         var length = 0.0
         for keys in t.tracks.values { if let last = keys.last { length = max(length, last.time) } }
         let loops = t.loopEnd > t.loopBegin && t.loopBegin >= 0
@@ -210,7 +252,10 @@ public final class KrkrEmotePlayer {
 
     private func blendValue(_ t: Timeline) -> Double { t.blendMove?.value(at: clock) ?? t.blend }
 
-    public func isPlaying(_ label: String) -> Bool { timelines.contains { $0.label == label && $0.playing } }
+    public func isPlaying(_ label: String) -> Bool {
+        if let m = motionPlay, label.isEmpty || m.motion == label { return motionRunning }
+        return timelines.contains { $0.label == label && $0.playing }
+    }
     public func blend(_ label: String) -> Double { timelines.first { $0.label == label }.map(blendValue) ?? 0 }
     public var playingLabels: [String] { timelines.filter(\.playing).map(\.label) }
     public func playingFlags(_ index: Int) -> Int {
@@ -221,6 +266,8 @@ public final class KrkrEmotePlayer {
     /// Whether anything is still moving towards an end: a timeline that ends, a variable,
     /// place or blend on its way (looping timelines and the controllers don't count).
     public var animating: Bool {
+        if let m = motionPlay, let motion = models.first?.objects[m.object]?[m.motion], motion.loopTime < 0,
+           clock - m.start < motion.lastTime { return true }
         if timelines.contains(where: { $0.playing && ($0.loopStart == nil || $0.blendMove != nil) }) { return true }
         if !moving.isEmpty { return true }
         return [coordX, coordY, rotation, scale, red, green, blue, alpha].contains { $0.move != nil }

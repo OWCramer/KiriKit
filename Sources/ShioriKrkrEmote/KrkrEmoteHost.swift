@@ -243,7 +243,16 @@ public final class KrkrEmoteHost {
                 var variables = pose
                 p.models[i].applySelectors(&variables)
                 let a = Self.timing ? CACurrentMediaTime() : 0
-                let list = renderer.drawList(variables: variables, transform: place)
+                let list = renderer.drawList(variables: variables, time: p.motionTime, transform: place)
+                if Self.trace {
+                    traceCount += 1
+                    if traceCount % 60 == 1 {
+                        if renderer.motion != nil {
+                            FileHandle.standardError.write(("emote host: listing " + renderer.listing(variables: variables, time: p.motionTime).joined(separator: " | ") + "\n").data(using: .utf8)!)
+                        }
+                        FileHandle.standardError.write("emote host: GPU draw \(width)x\(height) motion \(renderer.object ?? "-")/\(renderer.motion ?? "-") at \(p.motionTime) items \(list.items.count) shown \(p.shown) tint \(tint) place \(place)\n".data(using: .utf8)!)
+                    }
+                }
                 let b = Self.timing ? CACurrentMediaTime() : 0
                 if let ready = gpu.prepare(list, model: p.models[i], buffer: commands) { prepared.append(ready) }
                 if Self.timing {
@@ -339,7 +348,7 @@ public final class KrkrEmoteHost {
         for (i, renderer) in p.renderers.enumerated() {
             var variables = pose
             p.models[i].applySelectors(&variables)
-            let list = renderer.drawList(variables: variables, transform: place)
+            let list = renderer.drawList(variables: variables, time: p.motionTime, transform: place)
             if let ready = gpu.prepare(list, model: p.models[i], buffer: buffer) { prepared.append(ready) }
         }
         let evaluated = Self.trace ? Date() : nil
