@@ -21,7 +21,6 @@ void TVPShowPopMenu(tTJSNI_MenuItem *) {}
 
 void TVPOpenPatchLibUrl() {}
 
-ttstr TVPGetOSName() { return TVPGetPlatformName(); }
 
 // Compressed GPU texture files (PVR) aren't used by Shiori's games.
 #include <functional>

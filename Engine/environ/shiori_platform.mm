@@ -234,13 +234,12 @@ namespace TJS {
 void TVPConsoleLog(const ttstr &line) { shiori::log(line.AsStdString()); }
 } // namespace TJS
 
-ttstr TVPGetPlatformName() {
-#if TARGET_OS_IPHONE
-    return TJS_W("iPhone");
-#else
-    return TJS_W("MacOS");
-#endif
-}
+// The games are Windows builds and ask System.osName / platformName which Windows they're on
+// (Yuzusoft's scripts read the version from osName and take pre-Vista paths, an old movie
+// plug-in and proxyfs, when they can't find one). Shiori answers as KiriKiri does on a current
+// Windows: "Win32" and "Windows NT <major>.<minor> (build <n>)".
+ttstr TVPGetPlatformName() { return TJS_W("Win32"); }
+ttstr TVPGetOSName() { return TJS_W("Windows NT 10.0 (build 19045)"); }
 
 // ---- the screen ----
 // KiriKiri asks for the desktop size to place and size its windows; a 1920x1080 desktop keeps

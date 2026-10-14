@@ -13,6 +13,8 @@
 #include "DebugIntf.h"
 #include "EventIntf.h"
 #include "ScriptMgnIntf.h"
+#include "tjsByteCodeLoader.h"
+#include "tjsScriptBlock.h"
 #include "StorageIntf.h"
 #include "SysInitIntf.h"
 #include "RenderManager.h"
@@ -193,6 +195,45 @@ int evaluate(const std::string &expression, std::string &text) {
                 run.clear();
             }
             for (const auto &s : found) text += s + " ";
+            return 0;
+        }
+        // "#disasm:<storage>|<text>": the VM code of a compiled script's functions whose
+        // disassembly mentions <text> (a member's name), to see how a script calls a plug-in.
+        if (expression.rfind("#disasm:", 0) == 0) {
+            const std::string rest = expression.substr(8);
+            const size_t bar = rest.find('|');
+            const std::string storage = rest.substr(0, bar), needle = bar == std::string::npos ? "" : rest.substr(bar + 1);
+            std::unique_ptr<tTJSBinaryStream> stream(TVPCreateBinaryStreamForRead(ttstr(storage.c_str()), TJS_W("")));
+            std::vector<uint8_t> bytes(size_t(stream->GetSize()));
+            if (!bytes.empty()) stream->ReadBuffer(bytes.data(), tjs_uint(bytes.size()));
+            struct Lines : tTJSBinaryStream {
+                std::vector<std::string> lines;
+                tjs_uint64 Seek(tjs_int64, tjs_int) override { return 0; }
+                tjs_uint Read(void *, tjs_uint) override { return 0; }
+                tjs_uint Write(const void *buffer, tjs_uint size) override {
+                    lines.push_back(ttstr(static_cast<const tjs_char *>(buffer)).AsStdString());
+                    return size;
+                }
+                tjs_uint64 GetSize() override { return 0; }
+            } out;
+            tTJSByteCodeLoader loader;
+            tTJSScriptBlock *block = loader.ReadByteCode(TVPGetScriptEngine(), ttstr(storage.c_str()).c_str(), bytes.data(), bytes.size());
+            if (!block) { text = "not bytecode"; return 1; }
+            block->Dump(&out);
+            block->Release();
+            std::vector<std::string> context;
+            auto flush = [&] {
+                std::string joined;
+                for (const auto &l : context) joined += l + "\n";
+                if (needle.empty() ? !context.empty() : joined.find(needle) != std::string::npos)
+                    text += needle.empty() ? context.front() + "\n" : joined;
+                context.clear();
+            };
+            for (const auto &l : out.lines) {
+                if (!l.empty() && l[0] == '(') flush();
+                if (!l.empty()) context.push_back(l);
+            }
+            flush();
             return 0;
         }
         const bool sequence = expression.rfind("#seq:", 0) == 0;
