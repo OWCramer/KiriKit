@@ -1537,11 +1537,115 @@ index bc444ae..c9b30fe 100644
      return t != nullptr;
  }
  
+diff --git a/cpp/core/visual/FreeType.cpp b/cpp/core/visual/FreeType.cpp
+index 7878c91..5eacee1 100644
+--- a/cpp/core/visual/FreeType.cpp
++++ b/cpp/core/visual/FreeType.cpp
+@@ -66,6 +66,12 @@ protected:
+ 
+ private:
+     FT_StreamRec Stream;
++#ifdef SHIORIKRKR
++    // FreeType reads a font a few bytes at a time (a CFF charset byte by byte); each read
++    // was a seek and a read of the archive. Reads go through a block of the file instead.
++    std::vector<unsigned char> Block;
++    unsigned long BlockStart = 0, BlockSize = 0;
++#endif
+ 
+ public:
+     tGenericFreeTypeFace(const ttstr &fontname, tjs_uint32 options);
+@@ -194,6 +200,26 @@ unsigned long tGenericFreeTypeFace::IoFunc(FT_Stream stream,
+         static_cast<tGenericFreeTypeFace *>(stream->descriptor.pointer);
+ 
+     size_t result;
++#ifdef SHIORIKRKR
++    constexpr unsigned long kBlock = 64 * 1024;
++    if(count == 0)
++        return 0;
++    if(count <= kBlock / 4) {
++        if(offset < _this->BlockStart || offset + count > _this->BlockStart + _this->BlockSize) {
++            const unsigned long size = _this->Stream.size;
++            if(offset >= size)
++                return 0;
++            _this->Block.resize(kBlock);
++            _this->BlockStart = offset;
++            _this->BlockSize = std::min<unsigned long>(kBlock, size - offset);
++            _this->File->SetPosition(offset);
++            _this->File->ReadBuffer(_this->Block.data(), _this->BlockSize);
++        }
++        const unsigned long n = std::min<unsigned long>(count, _this->BlockStart + _this->BlockSize - offset);
++        memcpy(buffer, _this->Block.data() + (offset - _this->BlockStart), n);
++        return n;
++    }
++#endif
+     if(count == 0) {
+         // seek
+         result = 0;
 diff --git a/cpp/core/visual/FreeTypeFontRasterizer.cpp b/cpp/core/visual/FreeTypeFontRasterizer.cpp
-index a096963..65bf0f1 100644
+index a096963..c87c726 100644
 --- a/cpp/core/visual/FreeTypeFontRasterizer.cpp
 +++ b/cpp/core/visual/FreeTypeFontRasterizer.cpp
-@@ -90,6 +90,10 @@ void FreeTypeFontRasterizer::ApplyFont(class tTVPNativeBaseBitmap *bmp,
+@@ -13,6 +13,7 @@
+ #include "MsgIntf.h"
+ #include "FontSystem.h"
+ #include <complex>
++#include <algorithm>
+ 
+ extern void TVPUninitializeFreeFont();
+ extern FontSystem *TVPFontSystem;
+@@ -53,8 +54,13 @@ FreeTypeFontRasterizer::FreeTypeFontRasterizer() :
+     AddRef();
+ }
+ FreeTypeFontRasterizer::~FreeTypeFontRasterizer() {
+-
++#ifdef SHIORIKRKR
++    for(auto &f : Faces)
++        delete f.face;
++    Faces.clear();
++#else
+     delete Face;
++#endif
+     Face = nullptr;
+     if(FaceFallback) {
+         delete FaceFallback;
+@@ -68,8 +74,13 @@ void FreeTypeFontRasterizer::Release() {
+     RefCount--;
+     LastBitmap = nullptr;
+     if(RefCount == 0) {
+-
++#ifdef SHIORIKRKR
++        for(auto &f : Faces)
++            delete f.face;
++        Faces.clear();
++#else
+         delete Face;
++#endif
+         Face = nullptr;
+         if(FaceFallback) {
+             delete FaceFallback;
+@@ -87,9 +98,32 @@ void FreeTypeFontRasterizer::ApplyFont(class tTVPNativeBaseBitmap *bmp,
+     }
+ }
+ //---------------------------------------------------------------------------
++#ifdef SHIORIKRKR
++tFreeTypeFace *FreeTypeFontRasterizer::FindFace(const ttstr &name, tjs_uint32 opt) {
++    const tjs_uint32 file = opt & TVP_FACE_OPTIONS_FILE;
++    for(size_t i = 0; i < Faces.size(); ++i) {
++        if(Faces[i].file == file && Faces[i].name == name) {
++            if(i) std::rotate(Faces.begin(), Faces.begin() + i, Faces.begin() + i + 1);
++            return Faces.front().face;
++        }
++    }
++    constexpr size_t kFaces = 8;
++    if(Faces.size() >= kFaces) {
++        delete Faces.back().face;
++        Faces.pop_back();
++    }
++    Faces.insert(Faces.begin(), CachedFace{ name, file, new tFreeTypeFace(name, opt) });
++    return Faces.front().face;
++}
++#endif
++//---------------------------------------------------------------------------
  void FreeTypeFontRasterizer::ApplyFont(const tTVPFont &font) {
      CurrentFont = font;
      ttstr stdname = TVPFontSystem->GetBeingFont(font.Face);
@@ -1552,6 +1656,54 @@ index a096963..65bf0f1 100644
      // TVP_FACE_OPTIONS_NO_ANTIALIASING
      // TVP_FACE_OPTIONS_NO_HINTING
      // TVP_FACE_OPTIONS_FORCE_AUTO_HINTING
+@@ -100,6 +134,9 @@ void FreeTypeFontRasterizer::ApplyFont(const tTVPFont &font) {
+     opt |= (font.Flags & TVP_TF_STRIKEOUT) ? TVP_TF_STRIKEOUT : 0;
+     opt |= (font.Flags & TVP_TF_FONTFILE) ? TVP_FACE_OPTIONS_FILE : 0;
+     bool recreate = false;
++#ifdef SHIORIKRKR
++    Face = FindFace(stdname, opt);
++#else
+     if(Face) {
+         if(Face->GetFontName() != stdname) {
+             delete Face;
+@@ -110,6 +147,7 @@ void FreeTypeFontRasterizer::ApplyFont(const tTVPFont &font) {
+         Face = new tFreeTypeFace(stdname, opt);
+         recreate = true;
+     }
++#endif
+     Face->SetHeight(font.Height < 0 ? -font.Height : font.Height);
+     if(recreate == false) {
+         if(font.Flags & TVP_TF_ITALIC) {
+diff --git a/cpp/core/visual/FreeTypeFontRasterizer.h b/cpp/core/visual/FreeTypeFontRasterizer.h
+index 63f77b8..c723800 100644
+--- a/cpp/core/visual/FreeTypeFontRasterizer.h
++++ b/cpp/core/visual/FreeTypeFontRasterizer.h
+@@ -5,6 +5,7 @@
+ #include "tjsCommHead.h"
+ #include "CharacterData.h"
+ #include "FontRasterizer.h"
++#include <vector>
+ 
+ class FreeTypeFontRasterizer : public FontRasterizer {
+     tjs_int RefCount;
+@@ -12,6 +13,17 @@ class FreeTypeFontRasterizer : public FontRasterizer {
+     class tFreeTypeFace *FaceFallback = nullptr;
+     class tTVPNativeBaseBitmap *LastBitmap;
+     tTVPFont CurrentFont;
++#ifdef SHIORIKRKR
++    // Faces opened before, newest first (the face in use among them): a message window that
++    // switches between a name font and a text font reopened a font file at every switch.
++    struct CachedFace {
++        ttstr name;
++        tjs_uint32 file;
++        class tFreeTypeFace *face;
++    };
++    std::vector<CachedFace> Faces;
++    class tFreeTypeFace *FindFace(const ttstr &name, tjs_uint32 opt);
++#endif
+     void ApplyFallbackFace();
+ 
+ public:
 diff --git a/cpp/core/visual/GraphicsLoaderIntf.cpp b/cpp/core/visual/GraphicsLoaderIntf.cpp
 index 233fdd5..c3ea8de 100644
 --- a/cpp/core/visual/GraphicsLoaderIntf.cpp

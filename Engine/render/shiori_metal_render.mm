@@ -41,6 +41,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <deque>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -252,13 +253,69 @@ bool verifying() {
 // ---------------------------------------------------------------------------------------------
 // Images.
 
+// Image buffers the GPU has finished with, kept for the next image of the same size: a
+// message layer's buffer moves to a fresh one for each glyph drawn while the GPU still reads
+// it, and a new Metal buffer costs an IOGPU call (about 1 ms on a Mac).
+struct BufferPool {
+    struct Entry {
+        id<MTLBuffer> buffer;
+        size_t capacity;
+        uint64_t serial; // the GPU work that last used it
+    };
+    static constexpr size_t kMaxBytes = 48u << 20;
+    static constexpr size_t kMaxEntry = 16u << 20;
+    std::mutex mutex;
+    std::deque<Entry> entries;
+    size_t bytes = 0;
+    unsigned reused = 0;
+
+    id<MTLBuffer> take(size_t capacity) {
+        const uint64_t done = gpu().completed.load(std::memory_order_acquire);
+        std::lock_guard<std::mutex> lock(mutex);
+        for (auto it = entries.begin(); it != entries.end(); ++it) {
+            if (it->capacity != capacity || it->serial > done) continue;
+            id<MTLBuffer> buffer = it->buffer;
+            bytes -= it->capacity;
+            entries.erase(it);
+            ++reused;
+            return buffer;
+        }
+        return nil;
+    }
+    void give(id<MTLBuffer> buffer, size_t capacity, uint64_t serial) {
+        if (!buffer || capacity > kMaxEntry) return;
+        std::lock_guard<std::mutex> lock(mutex);
+        entries.push_back({buffer, capacity, serial});
+        bytes += capacity;
+        while (bytes > kMaxBytes && !entries.empty()) {
+            bytes -= entries.front().capacity;
+            entries.pop_front();
+        }
+    }
+};
+BufferPool &bufferPool() {
+    static BufferPool *pool = new BufferPool();
+    return *pool;
+}
+// A buffer for an image; cleared to zero, as a new Metal buffer is, unless the caller fills it.
+id<MTLBuffer> newImageBuffer(size_t capacity, bool clear) {
+    if (id<MTLBuffer> reused = bufferPool().take(capacity)) {
+        if (clear) memset(reused.contents, 0, capacity);
+        return reused;
+    }
+    return [gpu().device newBufferWithLength:capacity options:MTLResourceStorageModeShared];
+}
+
 class Texture final : public iTVPTexture2D {
 public:
     Texture(unsigned w, unsigned h, TVPTextureFormat::e format) : iTVPTexture2D(w, h), Format(format) {
         Allocate(w, h);
     }
     // Queued work keeps the buffer alive (command buffers retain what they use).
-    ~Texture() override { totalBytes() -= Capacity; }
+    ~Texture() override {
+        totalBytes() -= Capacity;
+        bufferPool().give(Storage, Capacity, LastUse.load(std::memory_order_acquire));
+    }
 
     static std::atomic<uint64_t> &totalBytes() {
         static std::atomic<uint64_t> bytes{0};
@@ -311,8 +368,9 @@ public:
             gpu().wait(use);
             return;
         }
-        id<MTLBuffer> fresh = [gpu().device newBufferWithLength:Capacity options:MTLResourceStorageModeShared];
+        id<MTLBuffer> fresh = newImageBuffer(Capacity, false);
         memcpy(fresh.contents, Bytes, Capacity);
+        bufferPool().give(Storage, Capacity, use);
         Storage = fresh;
         Bytes = static_cast<uint8_t *>(fresh.contents);
         LastUse.store(0, std::memory_order_release);
@@ -395,6 +453,7 @@ public:
         if (pitch * std::max(h, 1u) > Capacity || pitch != size_t(Pitch)) {
             IdleForWrite();
             totalBytes() -= Capacity;
+            bufferPool().give(Storage, Capacity, LastUse.load(std::memory_order_acquire));
             Allocate(w, h);
         }
         Width = w;
@@ -412,7 +471,7 @@ private:
     void Allocate(unsigned w, unsigned h) {
         Pitch = tjs_int(AlignedPitch(w));
         Capacity = size_t(Pitch) * std::max(h, 1u);
-        Storage = [gpu().device newBufferWithLength:Capacity options:MTLResourceStorageModeShared];
+        Storage = newImageBuffer(Capacity, true);
         Bytes = static_cast<uint8_t *>(Storage.contents);
         totalBytes() += Capacity;
     }
