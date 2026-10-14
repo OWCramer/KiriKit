@@ -458,6 +458,7 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
         next.deliver();
         if (next.button) break;
     }
+    shiori::repeatHeldKeys();
     // Profiled unless SHIORIKRKR_PROFILE=0: the lines go to the engine's log (the app keeps it
     // in the game's logs folder), so a device run tells where frames went.
     static const bool profile = [] {

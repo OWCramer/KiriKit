@@ -61,6 +61,8 @@ void pointerUp(int button, int x, int y);
 void wheel(int delta, int x, int y);
 void keyDown(int virtualKey);
 void keyUp(int virtualKey);
+/// Held keys repeat as on Windows (called once a tick).
+void repeatHeldKeys();
 void lastPointer(int &x, int &y);
 // Touch (a finger, as Windows reports it to KiriKiri: onTouchDown/Move/Up on the window, beside
 // the mouse events the same finger makes). Sent only while the game turned touch on

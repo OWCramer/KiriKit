@@ -6,6 +6,7 @@
 // which its cocos2d-x scene used to implement). It keeps the window's size, zoom, visibility and
 // the texture the layer manager composed for it; the host presents that texture and sends input
 // here. Keyboard and mouse button state (System.getKeyState) lives here too.
+#include <chrono>
 #include "shiori_environ.h"
 
 #include "tjsCommHead.h"
@@ -514,17 +515,39 @@ void shiori::wheel(int delta, int x, int y) {
     if (auto *w = target()) w->mouseWheel(delta, x, y);
 }
 
+// When each held key went down and last repeated (seconds on the steady clock).
+static double gKeyDownAt[0x200], gKeyRepeatAt[0x200];
+static double steadySeconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 void shiori::keyDown(int vk) {
     if (vk <= 0 || vk >= 0x200) return;
     const bool repeat = scancode[vk] & 1;
     scancode[vk] = 0x11;
+    if (!repeat) gKeyDownAt[vk] = gKeyRepeatAt[vk] = steadySeconds();
     if (auto *w = target()) w->InternalKeyDown(tjs_uint16(vk), TVPGetCurrentShiftKeyState() | (repeat ? ssRepeat : 0));
+}
+
+// A key held down repeats as Windows' keyboard does (after half a second, about 30 times a
+// second, each a key-down marked as a repeat): KAG restarts its Ctrl skip on these after a
+// movie or a choice stopped it, and moves on through menus while an arrow is held.
+void shiori::repeatHeldKeys() {
+    const double now = steadySeconds();
+    for (int vk = 1; vk < 0x200; ++vk) {
+        // (keys only: a mouse button held marks its key state too, and doesn't repeat)
+        if (!(scancode[vk] & 1) || gKeyDownAt[vk] == 0) continue;
+        if (now - gKeyDownAt[vk] < 0.5 || now - gKeyRepeatAt[vk] < 1.0 / 30) continue;
+        gKeyRepeatAt[vk] = now;
+        if (auto *w = target()) w->InternalKeyDown(tjs_uint16(vk), TVPGetCurrentShiftKeyState() | ssRepeat);
+    }
 }
 
 void shiori::keyUp(int vk) {
     if (vk <= 0 || vk >= 0x200) return;
     const bool wasDown = scancode[vk] & 1;
     scancode[vk] &= 0x10;
+    gKeyDownAt[vk] = 0;
     if (wasDown)
         if (auto *w = target()) w->OnKeyUp(tjs_uint16(vk), TVPGetCurrentShiftKeyState());
 }
