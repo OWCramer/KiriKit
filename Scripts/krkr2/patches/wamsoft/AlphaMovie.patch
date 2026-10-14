@@ -1,5 +1,5 @@
 diff --git a/AlphaMovie.cpp b/AlphaMovie.cpp
-index a108d51..1b28440 100644
+index a108d51..12198e3 100644
 --- a/AlphaMovie.cpp
 +++ b/AlphaMovie.cpp
 @@ -30,6 +30,8 @@
@@ -11,7 +11,34 @@ index a108d51..1b28440 100644
  #include <vector>
  
  //---------------------------------------------------------------------------
-@@ -336,6 +338,12 @@ static bool getLayerWriteBuffer(iTJSDispatch2 *lay, tjs_int &w, tjs_int &h,
+@@ -151,7 +153,7 @@ struct HuffTable {
+ 	}
+ };
+ 
+-// エントロピー用ビットリーダ (JPEG 由来: 0xFF00 バイトスタッフを解除)
++// エントロピー用ビットリーダ (no byte stuffing)
+ struct BitReader {
+ 	const tjs_uint8 *p, *end;
+ 	tjs_uint32 acc;   // 現在のバイトのビット
+@@ -161,13 +163,10 @@ struct BitReader {
+ 	inline int bit() {
+ 		if (cnt == 0) {
+ 			if (p >= end) return 0;         // データ枯渇時は 0 で埋める
+-			tjs_uint8 b = *p++;
+-			if (b == 0xFF) {
+-				// 0xFF00 は literal 0xFF、0xFFxx(marker) は終端扱い
+-				if (p < end && *p == 0x00) p++;
+-				else { /* marker: これ以上読まない */ }
+-			}
+-			acc = b; cnt = 8;
++			// The movies' entropy data has no JPEG byte stuffing: a 0xFF is followed by data like
++			// any other byte (skipping 0x00 after it threw large frames off from the first such
++			// pair on: ATRI's full-screen opening came out as garbage below a band at the top).
++			acc = *p++; cnt = 8;
+ 		}
+ 		cnt--;
+ 		return (acc >> cnt) & 1;
+@@ -336,6 +335,12 @@ static bool getLayerWriteBuffer(iTJSDispatch2 *lay, tjs_int &w, tjs_int &h,
  	return (ptr != 0 && w > 0 && h > 0 && pitch != 0);
  }
  
@@ -24,7 +51,7 @@ index a108d51..1b28440 100644
  //---------------------------------------------------------------------------
  // AlphaMovie クラス本体
  //---------------------------------------------------------------------------
-@@ -358,7 +366,7 @@ public:
+@@ -358,7 +363,7 @@ public:
  
  	//----------------------------------------------------------- ストレージ操作
  	void closeStream() {
@@ -33,7 +60,7 @@ index a108d51..1b28440 100644
  	}
  
  	// amv を開く
-@@ -487,6 +495,11 @@ public:
+@@ -487,6 +492,11 @@ public:
  		decodeFrame(CurrentIndex, bgra, fleft, ftop, fw, fh);
  
  		blitToLayer(layer, bgra, fleft, ftop, fw, fh);
@@ -45,7 +72,7 @@ index a108d51..1b28440 100644
  
  		tjs_int ret = (tjs_int)Frames[CurrentIndex].number;
  		CurrentIndex++;
-@@ -530,7 +543,7 @@ private:
+@@ -530,7 +540,7 @@ private:
  	//----------------------------------------------------------- フレーム情報
  	struct FrameInfo { tjs_int64 offset; tjs_uint32 number; };
  
@@ -54,7 +81,7 @@ index a108d51..1b28440 100644
  	tjs_uint32 NumOfFrame;
  	tjs_int64  FirstFrameOfs;
  	tjs_uint16 Width, Height;
-@@ -576,7 +589,11 @@ private:
+@@ -576,7 +586,11 @@ private:
  		ftop  = rdS16(fh20 + 14);
  		fw    = rdU16(fh20 + 16);
  		fh    = rdU16(fh20 + 18);
@@ -67,7 +94,24 @@ index a108d51..1b28440 100644
  			TVPThrowExceptionMessage(TJS_W("File format error."));
  
  		tjs_uint payloadLen = size - 12;
-@@ -642,7 +659,11 @@ private:
+@@ -616,9 +630,16 @@ private:
+ 				int r = yy + ((91881  * (cr - 128)) >> 16);
+ 				int g = yy - ((22554  * (cb - 128) + 46802 * (cr - 128)) >> 16);
+ 				int b = yy + ((116130 * (cb - 128)) >> 16);
++#ifdef SHIORIKRKR
++				// Shiori's krkr2 keeps layer pixels as R, G, B, A.
++				dst[0] = clip8(r);
++				dst[1] = clip8(g);
++				dst[2] = clip8(b);
++#else
+ 				dst[0] = clip8(b);
+ 				dst[1] = clip8(g);
+ 				dst[2] = clip8(r);
++#endif
+ 				dst[3] = (tjs_uint8)a;
+ 			}
+ 		}
+@@ -642,7 +663,11 @@ private:
  		fw    = rdU16(fh24 + 16);
  		fh    = rdU16(fh24 + 18);
  		tjs_uint32 alphaZlibLen  = rdU32(fh24 + 20);
@@ -80,7 +124,24 @@ index a108d51..1b28440 100644
  			TVPThrowExceptionMessage(TJS_W("File format error."));
  
  		// alpha(zlib) が先
-@@ -709,11 +730,29 @@ private:
+@@ -695,9 +720,16 @@ private:
+ 				int r = yy + ((91881  * (cr - 128)) >> 16);
+ 				int g = yy - ((22554  * (cb - 128) + 46802 * (cr - 128)) >> 16);
+ 				int b = yy + ((116130 * (cb - 128)) >> 16);
++#ifdef SHIORIKRKR
++				// Shiori's krkr2 keeps layer pixels as R, G, B, A.
++				dst[0] = clip8(r);
++				dst[1] = clip8(g);
++				dst[2] = clip8(b);
++#else
+ 				dst[0] = clip8(b);
+ 				dst[1] = clip8(g);
+ 				dst[2] = clip8(r);
++#endif
+ 				dst[3] = ar[x];
+ 			}
+ 		}
+@@ -709,11 +741,29 @@ private:
  	void blitToLayer(iTJSDispatch2 *layer, std::vector<tjs_uint8> &bgra,
  					 tjs_int fleft, tjs_int ftop, tjs_int fw, tjs_int fh)
  	{
