@@ -20,6 +20,8 @@
 #include <condition_variable>
 #include <deque>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -91,9 +93,35 @@ struct DecodedFrame {
 
 class MovieCore {
 public:
-    MovieCore(tTJSNI_VideoOverlay *owner, bool layer) : owner_(owner), layer_(layer) {}
+    MovieCore(tTJSNI_VideoOverlay *owner, bool layer) : owner_(owner), layer_(layer) {
+        std::lock_guard<std::mutex> lock(liveLock());
+        live().insert(this);
+    }
+
+    // Every movie still alive (a game can leave one playing when it ends).
+    static std::mutex &liveLock() {
+        static std::mutex lock;
+        return lock;
+    }
+    static std::set<MovieCore *> &live() {
+        static std::set<MovieCore *> movies;
+        return movies;
+    }
+    // A game ended or began: movies left from before stop (their sound too) and nothing of
+    // theirs stays in the overlay, which the next game's frames would otherwise show.
+    static void stopAll() {
+        std::lock_guard<std::mutex> lock(liveLock());
+        for (MovieCore *movie : live()) movie->stop();
+        std::lock_guard<std::mutex> overlay(movieOverlayLock());
+        overlaySlot().reset();
+        drawn_ = nullptr;
+    }
 
     ~MovieCore() {
+        {
+            std::lock_guard<std::mutex> lock(liveLock());
+            live().erase(this);
+        }
         quit_ = true;
         wake_.notify_all();
         if (thread_.joinable()) thread_.join();
@@ -619,6 +647,9 @@ iTVPVideoOverlay *makePlayer(tTJSNI_VideoOverlay *owner, const tjs_char *name, b
 }
 
 } // namespace
+
+void stopAllMovies() { MovieCore::stopAll(); }
+
 } // namespace shiorikrkr
 
 // The environ's video overlay factories krkr2's VideoOverlay class calls (the stream it opened

@@ -416,6 +416,7 @@ SHIORIKRKR_EXPORT int shiorikrkr_start(const shiorikrkr_config_t *config) {
 
     TVPShioriPrepareRestart(); // a game played before in this process
     ShioriPrefetchReset();
+    shiorikrkr::stopAllMovies(); // (and at the start too: nothing of an earlier game shows)
     ++sessionCount;
     // Scenarios parsed for the last game (cached by name) are not this one's.
     TVPClearScnearioCache();
@@ -772,6 +773,9 @@ SHIORIKRKR_EXPORT void shiorikrkr_stop(void) {
     } catch (...) {
         hostLog("ShioriKrkr: shutdown threw");
     }
+    // A movie the game left playing goes, and with it its last frame in the overlay (the next
+    // game's frames showed it on top).
+    shiorikrkr::stopAllMovies();
     // Messages the game's objects posted and never saw delivered hold pointers to them.
     if (::Application) {
         ::Application->FilterUserMessage(

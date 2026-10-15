@@ -27,4 +27,7 @@ struct MovieOverlayFrame {
 std::mutex &movieOverlayLock();
 MovieOverlayFrame *movieOverlay(); // nullptr when none
 
+/// A game ended or began: every movie still alive stops and the overlay empties.
+void stopAllMovies();
+
 } // namespace shiorikrkr
