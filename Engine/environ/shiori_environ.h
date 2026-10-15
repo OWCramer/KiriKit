@@ -83,6 +83,8 @@ extern void (*cursorChanged)(int cursor, const std::string &storage);
 
 // ---- audio (shiori_audio.mm) ----
 void audioSuspend(bool suspended);
+/// Render callbacks of the audio output so far (it keeps calling while sound can go out).
+uint64_t audioRenders();
 void audioShutdown();
 
 } // namespace shiori

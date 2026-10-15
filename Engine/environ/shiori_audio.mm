@@ -223,6 +223,79 @@ private:
 class Mixer {
 public:
     bool start() {
+        std::lock_guard<std::recursive_mutex> unit(UnitLock);
+        Wanted = true;
+        observe();
+        return open();
+    }
+
+    void suspend(bool suspended) {
+        std::lock_guard<std::recursive_mutex> unit(UnitLock);
+        Suspended = suspended;
+        if (!Unit) return;
+        if (suspended && Running) {
+            AudioOutputUnitStop(Unit);
+            Running = false;
+        } else if (!suspended && !Running) {
+            resume("the app came back");
+        }
+    }
+
+    void shutdown() {
+        std::lock_guard<std::recursive_mutex> unit(UnitLock);
+        Wanted = false;
+        close();
+        // The last game's streams are its own (any it never freed stay silent).
+        std::lock_guard<std::mutex> lock(Lock);
+        Streams.clear();
+    }
+
+    // The output moved (another device, headphones, a controller's speaker), the system
+    // reset its media services, or an interruption (a call, Siri) ended: the output unit is
+    // made again at the device's format, if it wanted to run; the streams keep playing
+    // where they were.
+    void restart(const char *why) {
+        std::lock_guard<std::recursive_mutex> unit(UnitLock);
+        if (!Wanted) return;
+        close();
+        if (open()) shiori::log(std::string("ShioriKrkr: audio output restarted (") + why + ")");
+        else shiori::log(std::string("ShioriKrkr: audio output couldn't restart (") + why + ")");
+    }
+
+    // An interruption ended or the app came back: the same unit starts again (made again
+    // when that fails).
+    void resume(const char *why) {
+        std::lock_guard<std::recursive_mutex> unit(UnitLock);
+        if (!Wanted || Suspended) return;
+#if TARGET_OS_IPHONE
+        [AVAudioSession.sharedInstance setActive:YES error:nil];
+#endif
+        if (Unit && !Running) Running = AudioOutputUnitStart(Unit) == noErr;
+        if (!Unit || !Running) restart(why);
+    }
+
+    void interrupted() {
+        std::lock_guard<std::recursive_mutex> unit(UnitLock);
+        if (Unit && Running) AudioOutputUnitStop(Unit);
+        Running = false;
+        shiori::log("ShioriKrkr: audio interrupted");
+    }
+
+    // The device's sample rate now (the output unit's output scope).
+    double deviceRate() {
+        std::lock_guard<std::recursive_mutex> unit(UnitLock);
+        if (!Unit) return 0;
+        AudioStreamBasicDescription device = {};
+        UInt32 size = sizeof(device);
+        AudioUnitGetProperty(Unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &device, &size);
+        return device.mSampleRate;
+    }
+    double rate() const { return Rate; }
+    bool running() const { return Running; }
+
+private:
+    bool open() {
+        if (Unit) return true;
 #if TARGET_OS_IPHONE
         AVAudioSession *session = AVAudioSession.sharedInstance;
         if (![session.category isEqualToString:AVAudioSessionCategoryPlayback])
@@ -238,7 +311,10 @@ public:
 #endif
         desc.componentManufacturer = kAudioUnitManufacturer_Apple;
         AudioComponent component = AudioComponentFindNext(nullptr, &desc);
-        if (!component || AudioComponentInstanceNew(component, &Unit) != noErr) return false;
+        if (!component || AudioComponentInstanceNew(component, &Unit) != noErr) {
+            Unit = nullptr;
+            return false;
+        }
 
         AudioStreamBasicDescription device = {};
         UInt32 size = sizeof(device);
@@ -259,38 +335,66 @@ public:
         AURenderCallbackStruct callback = {render, this};
         AudioUnitSetProperty(Unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &callback,
                              sizeof(callback));
-        if (AudioUnitInitialize(Unit) != noErr) return false;
-        if (AudioOutputUnitStart(Unit) != noErr) return false;
-        Running = true;
-        shiori::log("ShioriKrkr: audio out at " + std::to_string(int(Rate)) + " Hz");
-        return true;
-    }
-
-    void suspend(bool suspended) {
-        if (!Unit) return;
-        if (suspended && Running) {
-            AudioOutputUnitStop(Unit);
-            Running = false;
-        } else if (!suspended && !Running) {
-#if TARGET_OS_IPHONE
-            [AVAudioSession.sharedInstance setActive:YES error:nil];
-#endif
-            Running = AudioOutputUnitStart(Unit) == noErr;
+        if (AudioUnitInitialize(Unit) != noErr) {
+            AudioComponentInstanceDispose(Unit);
+            Unit = nullptr;
+            return false;
         }
+        Running = !Suspended && AudioOutputUnitStart(Unit) == noErr;
+        shiori::log("ShioriKrkr: audio out at " + std::to_string(int(Rate)) + " Hz");
+        return Running || Suspended;
     }
 
-    void shutdown() {
+    void close() {
         if (!Unit) return;
         AudioOutputUnitStop(Unit);
         AudioUnitUninitialize(Unit);
         AudioComponentInstanceDispose(Unit);
         Unit = nullptr;
         Running = false;
-        // The last game's streams are its own (any it never freed stay silent).
-        std::lock_guard<std::mutex> lock(Lock);
-        Streams.clear();
     }
 
+    // The session's notifications, once per process (the mixer lives as long).
+    void observe() {
+        if (Observing) return;
+        Observing = true;
+#if TARGET_OS_IPHONE
+        NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+        Mixer *self = this;
+        [center addObserverForName:AVAudioSessionRouteChangeNotification object:nil queue:nil
+                        usingBlock:^(NSNotification *note) {
+                            const auto reason = AVAudioSessionRouteChangeReason(
+                                [note.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue]);
+                            // A new device, the old one gone, or the route reconfigured: the unit
+                            // may have stopped or run at the old rate.
+                            if (reason == AVAudioSessionRouteChangeReasonNewDeviceAvailable ||
+                                reason == AVAudioSessionRouteChangeReasonOldDeviceUnavailable ||
+                                reason == AVAudioSessionRouteChangeReasonOverride ||
+                                reason == AVAudioSessionRouteChangeReasonRouteConfigurationChange ||
+                                reason == AVAudioSessionRouteChangeReasonCategoryChange ||
+                                reason == AVAudioSessionRouteChangeReasonWakeFromSleep ||
+                                reason == AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory)
+                                self->restart("the route changed");
+                        }];
+        [center addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:nil
+                        usingBlock:^(NSNotification *note) {
+                            const auto type = AVAudioSessionInterruptionType(
+                                [note.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue]);
+                            if (type == AVAudioSessionInterruptionTypeBegan) self->interrupted();
+                            else self->resume("an interruption ended");
+                        }];
+        [center addObserverForName:AVAudioSessionMediaServicesWereResetNotification object:nil queue:nil
+                        usingBlock:^(NSNotification *) {
+                            // Every audio object of the old services is gone: made again (the old
+                            // unit is still stopped and disposed of first, which fails harmlessly
+                            // when it's already dead and keeps two units from rendering at once
+                            // when it isn't).
+                            self->restart("media services were reset");
+                        }];
+#endif
+    }
+
+public:
     bool started() const { return Unit != nullptr; }
 
     void add(Stream *s) {
@@ -306,21 +410,34 @@ private:
     static OSStatus render(void *context, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt32, UInt32 frames,
                            AudioBufferList *buffers) {
         auto *self = static_cast<Mixer *>(context);
+        self->Renders.fetch_add(1, std::memory_order_relaxed);
         float *out = static_cast<float *>(buffers->mBuffers[0].mData);
         memset(out, 0, size_t(frames) * 8);
         std::lock_guard<std::mutex> lock(self->Lock);
-        for (Stream *s : self->Streams) s->mix(out, int(frames), self->Rate);
+        for (Stream *s : self->Streams) s->mix(out, int(frames), self->Rate.load());
         // Soft limit so stacked voices never wrap.
         for (UInt32 i = 0; i < frames * 2; ++i) {
             const float v = out[i];
             if (v > 1.0f || v < -1.0f) out[i] = std::tanh(v);
         }
+        // SHIORIKRKR_AUDIO_DUMP=<file>: what goes out, as raw float stereo at the output's rate
+        // (for checking loops and gaps on the harness).
+        static FILE *dump = [] {
+            const char *path = getenv("SHIORIKRKR_AUDIO_DUMP");
+            return path ? fopen(path, "wb") : nullptr;
+        }();
+        if (dump) fwrite(out, sizeof(float), size_t(frames) * 2, dump);
         return noErr;
     }
 
     AudioComponentInstance Unit = nullptr;
-    double Rate = 48000.0;
-    bool Running = false;
+    std::atomic<double> Rate{48000.0};
+    std::atomic<bool> Running{false};
+    bool Wanted = false, Suspended = false, Observing = false;
+public:
+    std::atomic<uint64_t> Renders{0}; // render callbacks (the profile: is sound going out?)
+private:
+    std::recursive_mutex UnitLock; // the unit's life (notifications come on other threads)
     std::mutex Lock;
     std::vector<Stream *> Streams;
 };
@@ -351,6 +468,8 @@ iTVPSoundBuffer *TVPCreateSoundBuffer(tTVPWaveFormat &fmt, int bufcount) {
 void shiori::audioSuspend(bool suspended) {
     if (theMixer) theMixer->suspend(suspended);
 }
+
+uint64_t shiori::audioRenders() { return theMixer ? theMixer->Renders.load() : 0; }
 
 void shiori::audioShutdown() {
     if (!theMixer) return;

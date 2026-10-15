@@ -520,6 +520,11 @@ SHIORIKRKR_EXPORT int shiorikrkr_tick(void) {
                      profileTick * 1000 / 600, profileWorst * 1000, TVPShioriRenderSeconds * 1000 / 600, TVPShioriRenderCalls / 600,
                      ShioriEmoteDrawSeconds * 1000 / 600);
             hostLog(line);
+            // The audio output's callbacks (a stalled output, after a route change say, shows 0).
+            static uint64_t lastRenders = 0;
+            const uint64_t renders = shiori::audioRenders();
+            hostLog("ShioriKrkr audio: " + std::to_string(renders - lastRenders) + " output callbacks in 600 ticks");
+            lastRenders = renders;
             const std::string metal = shiori::metal::profileReport(600);
             if (!metal.empty()) hostLog(std::string("ShioriKrkr profile: frame wait ") +
                                         std::to_string(profileFrameWait * 1000 / 600).substr(0, 5) + " ms; " + metal);
