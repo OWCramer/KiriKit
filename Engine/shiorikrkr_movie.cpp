@@ -87,7 +87,8 @@ void convertYUV420(const AVFrame *frame, uint8_t *out, bool bgra) {
 }
 
 struct DecodedFrame {
-    int64_t ms = 0;
+    int64_t ms = 0;     // on the playing clock (past loops added)
+    int64_t fileMs = 0; // in the movie file
     std::vector<uint8_t> pixels;
 };
 
@@ -218,6 +219,8 @@ public:
 
     int64_t position() {
         std::lock_guard<std::mutex> lock(mutex_);
+        // A looping movie's position stays within the file (the clock runs on past the loops).
+        if (loopBegin_.load() >= 0 && shownFileMs_ >= 0) return shownFileMs_;
         return elapsedLocked();
     }
 
@@ -226,6 +229,12 @@ public:
         if (ended_) return vsEnded;
         if (paused_) return vsPaused;
         return playing_ ? vsPlaying : vsStopped;
+    }
+
+    void setLoop(int begin, int end) {
+        loopBegin_ = begin;
+        loopEnd_ = end;
+        wake_.notify_all();
     }
 
     void setVolume(long volume) {
@@ -280,7 +289,11 @@ public:
         }
         if (show) {
             wake_.notify_all();
-            frameIndex_ = int(show->ms * fps_ / 1000.0);
+            frameIndex_ = int(show->fileMs * fps_ / 1000.0);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                shownFileMs_ = show->fileMs;
+            }
             if (layer_) {
                 std::lock_guard<std::mutex> lock(frameMutex_);
                 current_ = std::move(show);
@@ -375,6 +388,7 @@ private:
         seekMs_ = ms;
         positionMs_ = ms;
         startedAt_ = Clock::now() - std::chrono::milliseconds(ms);
+        shownFileMs_ = -1;
         decodeDone_ = false;
         wake_.notify_all();
     }
@@ -422,14 +436,23 @@ private:
                     }
                     if (audio_) audio_->Reset();
                     skipBeforeMs_ = target;
+                    loopOffsetMs_ = 0;
+                    loopNow_ = false;
                     continue;
                 }
-                // Enough decoded ahead (frames waiting, a second of sound queued): wait.
-                const bool full = queueSize() >= 6 || (audio_ && audio_->GetLatencySamples() > tjs_uint(sound_->sample_rate));
+                // Enough decoded ahead: six frames waiting, or a second of sound queued while
+                // frames are waiting too (never while the picture has nothing to show: after a
+                // loop the sound still holds the end of the last pass).
+                const size_t frames = queueSize();
+                const bool full = frames >= 6 || (audio_ && frames >= 2 && audio_->GetLatencySamples() > tjs_uint(sound_->sample_rate));
                 if (decodeDone_ || full) {
                     wake_.wait_for(lock, std::chrono::milliseconds(full ? 4 : 50));
                     continue;
                 }
+            }
+            if (loopNow_) { // the loop's end frame decoded: on from its start
+                loopBack();
+                continue;
             }
             const int read = av_read_frame(format_, packet);
             if (read < 0) {
@@ -439,6 +462,12 @@ private:
                 if (sound_) {
                     avcodec_send_packet(sound_, nullptr);
                     receiveAudio(frame, interleaved);
+                }
+                // A looping movie goes on from its loop's start without a gap (as krkr2's own
+                // player loops when the game sets a loop segment); others end.
+                if (loopBegin_.load() >= 0) {
+                    loopBack();
+                    continue;
                 }
                 std::lock_guard<std::mutex> lock(mutex_);
                 decodeDone_ = true;
@@ -453,6 +482,22 @@ private:
         }
         av_frame_free(&frame);
         av_packet_free(&packet);
+    }
+
+    int64_t frameToMs(int frame) const { return int64_t(frame * 1000.0 / (fps_ > 0 ? fps_ : 30)); }
+
+    // Back to the loop's start: what follows plays on after what's queued, its times shifted by
+    // the loop's length, so the clock (and the sound) runs on.
+    void loopBack() {
+        const int begin = std::max(loopBegin_.load(), 0), end = loopEnd_.load();
+        const int64_t beginMs = frameToMs(begin);
+        const int64_t endMs = end > 0 ? frameToMs(end) : lastFileMs_ + int64_t(1000.0 / (fps_ > 0 ? fps_ : 30));
+        loopOffsetMs_ += std::max<int64_t>(endMs - beginMs, 1);
+        loopNow_ = false;
+        av_seek_frame(format_, -1, beginMs * 1000, AVSEEK_FLAG_BACKWARD);
+        avcodec_flush_buffers(video_);
+        if (sound_) avcodec_flush_buffers(sound_);
+        skipBeforeMs_ = beginMs;
     }
 
     size_t queueSize() {
@@ -473,8 +518,16 @@ private:
                 av_frame_unref(frame);
                 continue;
             }
+            const int end = loopEnd_.load();
+            if (loopBegin_.load() >= 0 && end > 0 && ms >= frameToMs(end)) { // past the loop's end
+                av_frame_unref(frame);
+                loopNow_ = true;
+                continue;
+            }
+            lastFileMs_ = ms;
             auto decoded = std::make_unique<DecodedFrame>();
-            decoded->ms = ms;
+            decoded->fileMs = ms;
+            decoded->ms = ms + loopOffsetMs_;
             decoded->pixels.resize(size_t(frame->width) * frame->height * 4);
             convertYUV420(frame, decoded->pixels.data(), false); // the engine's bitmaps are RGBA too
             av_frame_unref(frame);
@@ -485,7 +538,10 @@ private:
 
     void receiveAudio(AVFrame *frame, std::vector<float> &interleaved) {
         while (avcodec_receive_frame(sound_, frame) >= 0) {
-            if (audio_ && frameMs(frame, audioIndex_) + 1 >= skipBeforeMs_) {
+            const int end = loopEnd_.load();
+            const int64_t audioMs = frameMs(frame, audioIndex_);
+            const bool pastLoop = loopBegin_.load() >= 0 && end > 0 && audioMs >= frameToMs(end);
+            if (audio_ && !pastLoop && audioMs + 1 >= skipBeforeMs_) {
                 const int channels = frame->ch_layout.nb_channels, count = frame->nb_samples;
                 interleaved.resize(size_t(channels) * count);
                 for (int i = 0; i < count; ++i)
@@ -517,6 +573,12 @@ private:
     iTVPSoundBuffer *audio_ = nullptr;
     std::thread thread_;
     std::atomic<bool> quit_{false};
+    // The loop segment (KiriKiri's frames; begin -1 when not looping, end -1 for the movie's
+    // end) and, on the decoding thread, how far the clock has run on past loops.
+    std::atomic<int> loopBegin_{-1}, loopEnd_{-1};
+    int64_t loopOffsetMs_ = 0, lastFileMs_ = 0;
+    int64_t shownFileMs_ = -1; // the frame shown last, in the file (under mutex_)
+    bool loopNow_ = false;
 
     std::mutex mutex_; // playing state
     std::condition_variable_any wake_;
@@ -630,7 +692,7 @@ public:
     void GetSaturationStepSize(float *) override {}
     void GetSaturation(float *) override {}
     void SetSaturation(float) override {}
-    void SetLoopSegement(int, int) override {}
+    void SetLoopSegement(int begin, int end) override { core_.setLoop(begin, end); }
 
 private:
     MovieCore core_;
