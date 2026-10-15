@@ -1595,10 +1595,18 @@ index bc444ae..c9b30fe 100644
  }
  
 diff --git a/cpp/core/visual/FreeType.cpp b/cpp/core/visual/FreeType.cpp
-index 7878c91..5eacee1 100644
+index 7878c91..6508ebe 100644
 --- a/cpp/core/visual/FreeType.cpp
 +++ b/cpp/core/visual/FreeType.cpp
-@@ -66,6 +66,12 @@ protected:
+@@ -32,6 +32,7 @@
+ #include FT_TRUETYPE_UNPATENTED_H
+ #include FT_SYNTHESIS_H
+ #include FT_BITMAP_H
++#include FT_TRUETYPE_TABLES_H
+ #ifdef _MSC_VER
+ #pragma warning(pop)
+ #endif
+@@ -66,6 +67,12 @@ protected:
  
  private:
      FT_StreamRec Stream;
@@ -1611,7 +1619,7 @@ index 7878c91..5eacee1 100644
  
  public:
      tGenericFreeTypeFace(const ttstr &fontname, tjs_uint32 options);
-@@ -194,6 +200,26 @@ unsigned long tGenericFreeTypeFace::IoFunc(FT_Stream stream,
+@@ -194,6 +201,26 @@ unsigned long tGenericFreeTypeFace::IoFunc(FT_Stream stream,
          static_cast<tGenericFreeTypeFace *>(stream->descriptor.pointer);
  
      size_t result;
@@ -1638,6 +1646,78 @@ index 7878c91..5eacee1 100644
      if(count == 0) {
          // seek
          result = 0;
+@@ -396,6 +423,15 @@ void tFreeTypeFace::GetFaceNameList(std::vector<ttstr> &dest) {
+ }
+ //---------------------------------------------------------------------------
+ 
++//---------------------------------------------------------------------------
++tjs_int tFreeTypeFace::GetAscenderUnits() const {
++    // Shiori: the OS/2 typographic ascender where the font has one (as GDI's otmAscent),
++    // else FreeType's (hhea) ascender.
++    const TT_OS2 *os2 = static_cast<const TT_OS2 *>(FT_Get_Sfnt_Table(FTFace, FT_SFNT_OS2));
++    if(os2 && os2->version != 0xFFFFu && os2->sTypoAscender > 0)
++        return os2->sTypoAscender;
++    return FTFace->ascender;
++}
+ //---------------------------------------------------------------------------
+ /**
+  * フォントの高さを設定する
+@@ -491,7 +527,7 @@ tTVPCharacterData *tFreeTypeFace::GetGlyphFromCharcode(tjs_char code) {
+         // tGlyphBitmap を作成して返す
+         // int baseline = (int)(FTFace->height + FTFace->descender) *
+         // FTFace->size->metrics.y_ppem / FTFace->units_per_EM;
+-        int baseline = (int)(FTFace->ascender) * FTFace->size->metrics.y_ppem /
++        int baseline = (int)GetAscenderUnits() * FTFace->size->metrics.y_ppem /
+             FTFace->units_per_EM;
+ 
+         glyph_bmp = new tTVPCharacterData(ft_bmp->buffer, ft_bmp->pitch,
+@@ -540,7 +576,7 @@ bool tFreeTypeFace::GetGlyphRectFromCharcode(tTVPRect &rt, tjs_char code,
+     if(!LoadGlyphSlotFromCharcode(code))
+         return false;
+ 
+-    int baseline = (int)(FTFace->ascender) * FTFace->size->metrics.y_ppem /
++    int baseline = (int)GetAscenderUnits() * FTFace->size->metrics.y_ppem /
+         FTFace->units_per_EM;
+     /*
+     FT_Render_Glyph でレンダリングしないと以下の各値は取得できない
+diff --git a/cpp/core/visual/FreeType.h b/cpp/core/visual/FreeType.h
+index 5b5938e..8f57acc 100644
+--- a/cpp/core/visual/FreeType.h
++++ b/cpp/core/visual/FreeType.h
+@@ -93,17 +93,22 @@ public:
+         return static_cast<tjs_char>(FT_Get_First_Char(FTFace, &gindex));
+     }
+ 
++    // Shiori: the ascent the baseline sits below, in font units. KiriKiri on Windows
++    // (GDI) places text by OUTLINETEXTMETRIC::otmAscent, the OS/2 typographic ascender;
++    // FreeType's face->ascender is hhea's, which in CJK fonts like Source Han Sans is
++    // much taller (1160 against 880) and put text about a quarter em low.
++    [[nodiscard]] tjs_int GetAscenderUnits() const;
+     [[nodiscard]] tjs_int GetAscent() const {
+         tjs_int ppem = FTFace->size->metrics.y_ppem;
+         tjs_int upe = FTFace->units_per_EM;
+-        return FTFace->ascender * ppem / upe;
++        return GetAscenderUnits() * ppem / upe;
+     }
+     void GetUnderline(tjs_int &pos, tjs_int &thickness) const {
+         tjs_int ppem = FTFace->size->metrics.y_ppem;
+         tjs_int upe = FTFace->units_per_EM;
+         tjs_int liney = 0; // 下線の位置
+         tjs_int height = FT_PosToInt(FTFace->size->metrics.height);
+-        liney = ((FTFace->ascender - FTFace->underline_position) * ppem) / upe;
++        liney = ((GetAscenderUnits() - FTFace->underline_position) * ppem) / upe;
+         thickness = (FTFace->underline_thickness * ppem) / upe;
+         if(thickness < 1)
+             thickness = 1;
+@@ -118,7 +123,7 @@ public:
+         thickness = FTFace->underline_thickness * ppem / upe;
+         if(thickness < 1)
+             thickness = 1;
+-        pos = FTFace->ascender * 7 * ppem / (10 * upe);
++        pos = GetAscenderUnits() * 7 * ppem / (10 * upe);
+     }
+     tTVPCharacterData *GetGlyphFromCharcode(tjs_char code);
+     bool GetGlyphRectFromCharcode(struct tTVPRect &rt, tjs_char code,
 diff --git a/cpp/core/visual/FreeTypeFontRasterizer.cpp b/cpp/core/visual/FreeTypeFontRasterizer.cpp
 index a096963..c87c726 100644
 --- a/cpp/core/visual/FreeTypeFontRasterizer.cpp
