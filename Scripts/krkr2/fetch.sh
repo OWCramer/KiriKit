@@ -46,6 +46,9 @@ checkout() { # dir url commit patch
 mkdir -p "$VENDOR"
 checkout "$VENDOR/krkr2" "$KRKR2_URL" "$KRKR2_COMMIT" "$HERE/patches/krkr2/shiori.patch"
 checkout "$VENDOR/krkrsdl3" "$KRKRSDL3_URL" "$KRKRSDL3_COMMIT" "$HERE/patches/krkrsdl3/shiori.patch"
+# krkrsdl3's plug-ins include "ncbind/ncbind.hpp", which must be krkr2's (its copy declares a
+# tTJSNativeClassForPlugin that clashes with krkr2's TJS one).
+rm -rf "$VENDOR/krkrsdl3/plugins/ncbind"
 while read -r repo commit; do
     [ -n "$repo" ] || continue
     checkout "$VENDOR/upstream-plugins/$repo" "https://github.com/$repo" "$commit" \
