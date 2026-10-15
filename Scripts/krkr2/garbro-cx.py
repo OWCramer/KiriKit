@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+# If a copy of the MPL was not distributed with this file, You can obtain one at
+# https://mozilla.org/MPL/2.0/.
+#
 # Exports a KiriKiri CxDec scheme from GARbro's game database (ArcFormats/Resources/Formats.dat,
 # MIT licence, https://github.com/crskycode/GARbro) as a Shiori scheme file (SHCX), read by
 # ShioriKrkr (Packages/ShioriKrkrKit/Engine/cx_decrypt.cpp) and, on the Mac, by the AetherKrkr
