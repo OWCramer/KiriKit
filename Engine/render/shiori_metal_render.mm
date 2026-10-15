@@ -1036,8 +1036,20 @@ private:
         // covers (-0.5, -0.5)-(0.5, 0.5); AffineBlt puts an image drawn in place at -0.5 to
         // width - 0.5. Half a pixel more makes them edges too.
         auto whole = [](double v) { return std::fabs(v - std::round(v)) < 0.01; };
-        const bool betweenPixels = StretchType != 0 && !(whole(dstpt[0].x + 0.5) && whole(dstpt[0].y + 0.5) &&
-                                                         whole(dstpt[5].x + 0.5) && whole(dstpt[5].y + 0.5));
+        // The rectangle path only when it gives what the warp would: a same-size copy onto whole
+        // pixels from whole source pixels. A filtered stretch stays on the warp even on the frames
+        // it lands on whole pixels: the stretch kernel samples differently, and in a slow zoomed
+        // pan (KARAKARA's opening sky, 1920 drawn as 2400) those frames stood out as jumps.
+        const bool sameSize = eq(srcpt[5].x - srcpt[0].x, dstpt[5].x - dstpt[0].x) &&
+            eq(srcpt[5].y - srcpt[0].y, dstpt[5].y - dstpt[0].y);
+        const bool betweenPixels = StretchType != 0 && !(sameSize && whole(dstpt[0].x + 0.5) && whole(dstpt[0].y + 0.5) &&
+                                                         whole(dstpt[5].x + 0.5) && whole(dstpt[5].y + 0.5) &&
+                                                         whole(srcpt[0].x) && whole(srcpt[0].y) &&
+                                                         whole(srcpt[5].x) && whole(srcpt[5].y));
+        static const bool tracePan = getenv("SHIORIKRKR_TRACE_PAN") != nullptr;
+        if (tracePan && std::fabs(dstpt[5].x - dstpt[0].x) >= 600)
+            fprintf(stderr, "pan: dst %.3f,%.3f-%.3f,%.3f src %.3f,%.3f-%.3f,%.3f rect %d between %d\n", dstpt[0].x, dstpt[0].y,
+                    dstpt[5].x, dstpt[5].y, srcpt[0].x, srcpt[0].y, srcpt[5].x, srcpt[5].y, int(isSrcRect && isDstRect), int(betweenPixels));
         if (isSrcRect && isDstRect && !betweenPixels) {
             tTVPRect dstrect(tjs_int(std::floor(dstpt[0].x + 1)), tjs_int(std::floor(dstpt[0].y + 1)),
                              tjs_int(std::floor(dstpt[5].x + 1)), tjs_int(std::floor(dstpt[5].y + 1)));
