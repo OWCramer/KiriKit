@@ -31,15 +31,15 @@ if [ -n "$TITLE" ]; then
         [ -d "$ROOT/Vendor/garbro/.git" ] || git clone --depth 1 --filter=blob:none --sparse https://github.com/crskycode/GARbro "$ROOT/Vendor/garbro"
         git -C "$ROOT/Vendor/garbro" sparse-checkout set ArcFormats/KiriKiri ArcFormats/Resources
     fi
-    python3 -I "$ROOT/Scripts/kirikiri/garbro-cx.py" "$DB" "$TITLE" "$WORK/scheme.shcx" >/dev/null
+    python3 -I "$ROOT/Scripts/krkr2/garbro-cx.py" "$DB" "$TITLE" "$WORK/scheme.shcx" >/dev/null
     SCHEME=(--scheme "$WORK/scheme.shcx")
 fi
 PATCH=()
 [ -d "$GAME/patch" ] && PATCH=(--patch "$GAME/patch")
 # Shiori's E-mote player (Swift, on CatSystemKit) for the characters.
 if [ -z "${SHIORIKRKR_EMOTE_LIB:-}" ]; then
-    (cd "$ROOT/Packages/ShioriKrkrKit" && swift build -c release --product ShioriKrkrEmoteHarness >&2) || exit 1
-    export SHIORIKRKR_EMOTE_LIB="$ROOT/Packages/ShioriKrkrKit/.build/release/libShioriKrkrEmoteHarness.dylib"
+    (cd "$ROOT" && swift build -c release --product KiriKitEmoteHarness >&2) || exit 1
+    export SHIORIKRKR_EMOTE_LIB="$ROOT/.build/release/libKiriKitEmoteHarness.dylib"
 fi
 exec ${SHIORIKRKR_WRAP:-} "$ROOT/build/shiorikrkr/macos/shiorikrkr-harness" --base "$GAME/base" ${PATCH[@]+"${PATCH[@]}"} --work "$WORK" \
-    ${SCHEME[@]+"${SCHEME[@]}"} --font "$ROOT/App/Resources/SiglusFonts/BIZUDGothic-Regular.ttf" ${ARGS[@]+"${ARGS[@]}"}
+    ${SCHEME[@]+"${SCHEME[@]}"} --font "${SHIORIKRKR_FONT:-$ROOT/../shiori/App/Resources/SiglusFonts/BIZUDGothic-Regular.ttf}" ${ARGS[@]+"${ARGS[@]}"}

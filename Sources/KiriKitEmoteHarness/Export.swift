@@ -4,8 +4,8 @@
 
 // The Mac harness's way to Shiori's E-mote player: it dlopens this library and asks for
 // the table to hand the engine (the app links ShioriKrkrEmote directly).
-import CShioriKrkr
-import ShioriKrkrEmote
+import CKiriKit
+import KiriKit
 
 nonisolated(unsafe) private var table = KrkrEmoteHost.makeTable()
 

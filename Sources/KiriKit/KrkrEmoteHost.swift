@@ -3,7 +3,7 @@
 // https://mozilla.org/MPL/2.0/.
 
 import CatSystemKit
-import CShioriKrkr
+import CKiriKit
 import Foundation
 import Metal
 import QuartzCore

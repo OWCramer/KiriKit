@@ -3,7 +3,7 @@
 # If a copy of the MPL was not distributed with this file, You can obtain one at
 # https://mozilla.org/MPL/2.0/.
 #
-# Builds Shiori's own KiriKiri engine (krkr2's core + Packages/ShioriKrkrKit/Engine) per slice
+# Builds Shiori's own KiriKiri engine (krkr2's core + Engine/) per slice
 # and packs the iOS slices as Vendor/ShioriKrkr.xcframework (one dynamic framework each,
 # exporting only shiorikrkr.h). The macOS slice is the harness's. Run fetch.sh first.
 #
@@ -13,7 +13,9 @@ set -euo pipefail
 
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-ENGINE="$ROOT/Packages/ShioriKrkrKit/Engine"
+ENGINE="$ROOT/Engine"
+# FFmpeg: github.com/OWCramer/shiori-ffmpeg, checked out beside this repository.
+FFMPEG="${SHIORI_FFMPEG:-$ROOT/../shiori-ffmpeg}"
 VENDOR="$ROOT/Vendor"
 WORK="$ROOT/build/shiorikrkr"
 NAME=ShioriKrkr
@@ -73,25 +75,25 @@ built=()
 for slice in "${SLICES[@]}"; do
     case $slice in
     macos)
-        [ -f "$ROOT/build/ffmpeg-macos/install/lib/libffmpeg.a" ] || "$ROOT/Scripts/krkr2/build-ffmpeg-macos.sh"
+        [ -f "$FFMPEG/build/ffmpeg-macos/install/lib/libffmpeg.a" ] || "$FFMPEG/Scripts/ffmpeg/build-ffmpeg-macos.sh"
         configure_and_build macos arm64-osx -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
-            -DFFMPEG_INCLUDE="$ROOT/build/ffmpeg-macos/install/include" \
-            -DFFMPEG_LIBRARY="$ROOT/build/ffmpeg-macos/install/lib/libffmpeg.a"
+            -DFFMPEG_INCLUDE="$FFMPEG/build/ffmpeg-macos/install/include" \
+            -DFFMPEG_LIBRARY="$FFMPEG/build/ffmpeg-macos/install/lib/libffmpeg.a"
         echo "== harness: $WORK/macos/shiorikrkr-harness"
         ;;
     simulator)
         configure_and_build simulator arm64-ios-simulator -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=$MIN_IOS \
-            -DFFMPEG_INCLUDE="$VENDOR/ShioriFFmpeg.xcframework/ios-arm64-simulator/Headers" \
-            -DFFMPEG_LIBRARY="$VENDOR/ShioriFFmpeg.xcframework/ios-arm64-simulator/libffmpeg.a"
+            -DFFMPEG_INCLUDE="$FFMPEG/Vendor/ShioriFFmpeg.xcframework/ios-arm64-simulator/Headers" \
+            -DFFMPEG_LIBRARY="$FFMPEG/Vendor/ShioriFFmpeg.xcframework/ios-arm64-simulator/libffmpeg.a"
         make_framework simulator iPhoneSimulator
         built+=(-framework "$WORK/frameworks/simulator/$NAME.framework")
         ;;
     device)
         configure_and_build device arm64-ios -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=$MIN_IOS \
-            -DFFMPEG_INCLUDE="$VENDOR/ShioriFFmpeg.xcframework/ios-arm64/Headers" \
-            -DFFMPEG_LIBRARY="$VENDOR/ShioriFFmpeg.xcframework/ios-arm64/libffmpeg.a"
+            -DFFMPEG_INCLUDE="$FFMPEG/Vendor/ShioriFFmpeg.xcframework/ios-arm64/Headers" \
+            -DFFMPEG_LIBRARY="$FFMPEG/Vendor/ShioriFFmpeg.xcframework/ios-arm64/libffmpeg.a"
         make_framework device iPhoneOS
         built+=(-framework "$WORK/frameworks/device/$NAME.framework")
         ;;

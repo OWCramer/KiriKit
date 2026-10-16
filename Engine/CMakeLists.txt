@@ -20,7 +20,7 @@ set(CMAKE_OBJC_VISIBILITY_PRESET hidden)
 set(CMAKE_OBJCXX_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 
-set(VENDOR "${CMAKE_CURRENT_SOURCE_DIR}/../../../Vendor" CACHE PATH "Shiori's Vendor folder")
+set(VENDOR "${CMAKE_CURRENT_SOURCE_DIR}/../Vendor" CACHE PATH "Shiori's Vendor folder")
 set(KRKR2 "${VENDOR}/krkr2/cpp")
 set(CORE "${KRKR2}/core")
 set(SDL3PLUGINS "${VENDOR}/krkrsdl3/plugins")
