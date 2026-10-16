@@ -5,9 +5,8 @@
 #
 # Exports a KiriKiri CxDec scheme from GARbro's game database (ArcFormats/Resources/Formats.dat,
 # MIT licence, https://github.com/crskycode/GARbro) as a Shiori scheme file (SHCX), read by
-# ShioriKrkr (Packages/ShioriKrkrKit/Engine/cx_decrypt.cpp) and, on the Mac, by the AetherKrkr
-# reference harness (AETHERKIRI_CX_SCHEME, patch 0015). The app builds the same files itself
-# (GARbroDatabase.swift); this script is for the Mac harnesses.
+# KiriKit (Engine/cx_decrypt.cpp). The app builds the same files itself (GARbroDatabase.swift);
+# this script is for the Mac harness.
 #
 # Hx titles (KiriKiri Z's Hxv4 archives: GARbro's HxCrypt) are written as SHCX version 2: the
 # same CxDec part, then an Hx section with the index keys per archive, the filter key, the

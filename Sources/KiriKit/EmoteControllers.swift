@@ -9,8 +9,7 @@ import Foundation
 /// (`eyeControl`) and hair, bust and parts swing (`hairControl`, `bustControl`,
 /// `partsControl`). They write their variables after the timelines each frame.
 ///
-/// the user's design from Shiori's AetherKrkr extension (patch 0009, ShioriEmoteExtension.cpp),
-/// re-homed here in Swift; matched against the shipped games' footage, not M2's SDK:
+/// Matched against the shipped games' footage, not M2's SDK:
 /// - a blink closes the eye from where it is to the control's `endFrame` and opens it
 ///   again over `blinkFrameCount` frames, every `blinkIntervalMin`…`Max` frames, and only
 ///   while the eye is ordinarily open (the control's first `edge` range, below closed);

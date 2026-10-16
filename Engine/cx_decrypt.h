@@ -3,7 +3,7 @@
  * https://mozilla.org/MPL/2.0/. */
 
 // KiriKiri CxDec archive decryption, the algorithm of GARbro's CxEncryption (MIT,
-// Copyright (C) 2014-2016 morkt; see PROVENANCE.md) written for ShioriKrkr. Decrypts in
+// Copyright (C) 2014-2016 morkt; see README.md (Licences)) written for ShioriKrkr. Decrypts in
 // memory only, from a scheme the host builds out of GARbro's database (SHCX layout,
 // App/Sources/Engines/KiriKiri/GARbroDatabase.swift); nothing is read from the game's
 // executable.

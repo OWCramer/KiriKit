@@ -2,8 +2,7 @@
  * If a copy of the MPL was not distributed with this file, You can obtain one at
  * https://mozilla.org/MPL/2.0/. */
 
-// NEKO WORKs XP3 archives (NEKOPARA and its family). the user's own format work (AetherKrkr patch
-// 0001, Shiori-written; phases.md Phase 11), re-homed for ShioriKrkr:
+// NEKO WORKs XP3 archives (NEKOPARA and its family):
 // - real names live in 'neko' chunks (Vol. 0, Extra, Vol. 4) or, in the older layout, 'eliF'
 //   chunks (Vol. 1 and 2), each an adlr hash, a length and a UTF-16 name (Shiori's krkr2 patch
 //   maps them like 'hnfn'); unnamed entries (a decoy startup.tjs, a warning) are skipped;

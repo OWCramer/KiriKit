@@ -12,7 +12,7 @@
 // The PSB layout is the one Shiori's own reader knows (CatSystemKit's PSB.swift): a header of
 // offsets, a key trie in three integer arrays, string offsets, resource offsets and lengths,
 // and tagged values. Written fresh from that; nothing from krkr2's or krkrsdl3's psbfile
-// plug-ins (PROVENANCE.md).
+// plug-ins (README.md (Licences)).
 #include "tjsCommHead.h"
 #include <ncbind.hpp>
 #include "tjsArray.h"

@@ -2,11 +2,11 @@
 # If a copy of the MPL was not distributed with this file, You can obtain one at
 # https://mozilla.org/MPL/2.0/.
 #
-# ShioriKrkr: Shiori's own KiriKiri engine. krkr2's core (Vendor/krkr2 at the commit
-# AetherKrkr forked from, KiriKiri licence) with Shiori's own environment (window, input,
+# KiriKit: Shiori's own KiriKiri engine. krkr2's core (Vendor/krkr2 at commit 3ac366c,
+# KiriKiri licence) with Shiori's own environment (window, input,
 # audio, Metal compositor, host interface), as one dynamic library that exports only
 # shiorikrkr.h. Built per slice by Scripts/krkr2/build-framework.sh; on macOS it also builds
-# the harness. Which krkr2 files are left out and why: Packages/ShioriKrkrKit/PROVENANCE.md.
+# the harness.
 cmake_minimum_required(VERSION 3.28)
 project(ShioriKrkr LANGUAGES C CXX OBJC OBJCXX)
 

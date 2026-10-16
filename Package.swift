@@ -4,11 +4,10 @@
 // https://mozilla.org/MPL/2.0/.
 import PackageDescription
 
-// KiriKit, Shiori's own KiriKiri engine (Phase 23): krkr2's core plus Shiori's environment, renderer and
+// KiriKit, Shiori's own KiriKiri engine: krkr2's core plus Shiori's environment, renderer and
 // host glue, built as Vendor/ShioriKrkr.xcframework by Scripts/krkr2/build-framework.sh from Engine/. This
 // package holds its C interface, the loader the app opens it with, and the host's E-mote
-// player (KiriKit, on CatSystemKit's renderer). Clean-room: nothing here comes from
-// AetherKrkr (PROVENANCE.md).
+// player (KiriKit, on CatSystemKit's renderer).
 let package = Package(
     name: "KiriKit",
     platforms: [.iOS(.v18), .macOS(.v15), .tvOS(.v18)],

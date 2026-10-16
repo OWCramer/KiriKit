@@ -14,8 +14,8 @@ set -euo pipefail
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ENGINE="$ROOT/Engine"
-# FFmpeg: github.com/OWCramer/shiori-ffmpeg, checked out beside this repository.
-FFMPEG="${SHIORI_FFMPEG:-$ROOT/../shiori-ffmpeg}"
+# FFmpeg: built by github.com/OWCramer/shiori (Scripts/ffmpeg), checked out beside this repository.
+FFMPEG="${SHIORI_FFMPEG:-$ROOT/../shiori}"
 VENDOR="$ROOT/Vendor"
 WORK="$ROOT/build/shiorikrkr"
 NAME=ShioriKrkr

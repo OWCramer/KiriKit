@@ -3,7 +3,7 @@
  * https://mozilla.org/MPL/2.0/. */
 
 // KiriKiri Z "Hx" archives (Hxv4 index chunk), ported from GARbro's HxCrypt
-// (ArcFormats/KiriKiri/HxCrypt.cs, MIT, Copyright (C) 2018 by morkt; see PROVENANCE.md).
+// (ArcFormats/KiriKiri/HxCrypt.cs, MIT, Copyright (C) 2018 by morkt; see README.md (Licences)).
 // An Hx archive's File entries carry numbered names; its Hxv4 chunk points at an index,
 // encrypted with ChaCha20 and compressed, that gives each entry its directory and file name
 // hashes and its file key. Each entry is decrypted with a filter built from that key through
@@ -61,7 +61,7 @@ bool hxReadIndex(const HxScheme &scheme, const std::string &archiveName, const u
 std::u16string hxEntryName(uint64_t id);
 
 // The index's name hashes (published facts about Hx, written here from the algorithms'
-// specifications: see PROVENANCE.md). Both hash UTF-16LE text followed by "xp3hnp".
+// specifications: see README.md (Licences)). Both hash UTF-16LE text followed by "xp3hnp".
 /// SipHash-2-4 (Aumasson & Bernstein, reference specification) of `message` under `key`.
 uint64_t sipHash24(const uint8_t key[16], const uint8_t *message, size_t size);
 /// BLAKE2s-256, unkeyed (RFC 7693).

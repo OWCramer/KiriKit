@@ -11,8 +11,8 @@
 // each 1 KiB of keystream being one ChaCha block followed by words that xorshift the word
 // 64 bytes before them; their LZ4 comes as linked blocks with 16-bit sizes. The values carry
 // a check byte each from a small byte-shift generator seeded by the pack's seed, and a final
-// check word follows. Behaviour notes in PROVENANCE.md (the format was learnt by reading
-// Aether's decoder for guidance; this is Shiori's own implementation).
+// check word follows. Shiori's own implementation; the format was learnt by studying an
+// existing decoder.
 #include "tjsCommHead.h"
 #include <ncbind.hpp>
 #include "tjsArray.h"

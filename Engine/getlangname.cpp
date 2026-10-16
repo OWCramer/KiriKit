@@ -7,7 +7,7 @@
 // language by its English name ("English", "Japanese", "Chinese (Simplified)"): the games lower
 // the case and look for "japanese", "chinese" and "english" in it (NEKOPARA Vol. 0's
 // getSystemLanguageId, Extra's language alias map), so a locale name such as "ja-JP" counted as
-// English. the user's own plug-in (AetherKrkr patch 0021, Shiori-written), re-homed for ShioriKrkr.
+// English.
 #include "ncbind/ncbind.hpp"
 
 #include <cstdlib>

@@ -6,13 +6,12 @@
 # Fetches what Shiori's own KiriKiri engine (ShioriKrkr) is built from, into Vendor/
 # (gitignored), and applies Shiori's changes (Scripts/krkr2/patches, written back by
 # export-patches.sh):
-#   - krkr2 (2468785842/krkr2) at the commit AetherKrkr forked from: the engine's core
+#   - krkr2 (2468785842/krkr2) at commit 3ac366c: the engine's core
 #     (KiriKiri licence);
 #   - krkrsdl3 at a pinned commit: the few plug-ins with no other source (PackinOne, lzfs,
 #     gfxEffect, LayerExDraw on plutovg; KiriKiri licence plus its publish-your-changes term);
 #   - wamsoft's plug-in repositories (KiriKiri licence), pinned;
 #   - vcpkg, and the dependencies it builds for each slice.
-# Nothing here comes from Vendor/Aether.
 #
 #   Scripts/krkr2/fetch.sh            # all three slices
 #   Scripts/krkr2/fetch.sh arm64-osx  # one slice
@@ -24,7 +23,7 @@ HERE="$ROOT/Scripts/krkr2"
 VENDOR="$ROOT/Vendor"
 
 KRKR2_URL=https://github.com/2468785842/krkr2
-KRKR2_COMMIT=3ac366c439a142f1712ed3059cb80184cb102dbf   # 2025-09-21, AetherKrkr's fork point
+KRKR2_COMMIT=3ac366c439a142f1712ed3059cb80184cb102dbf   # 2025-09-21
 KRKRSDL3_URL=https://github.com/krkrsdl3/krkrsdl3
 KRKRSDL3_COMMIT=358b0469bd41ffd2fc8cc08bcaa1e205e817aff9   # 2026-09-30
 VCPKG_URL=https://github.com/microsoft/vcpkg

@@ -4,7 +4,7 @@
 
 // Hx archives, as GARbro's HxCrypt reads them (ArcFormats/KiriKiri/HxCrypt.cs, MIT,
 // Copyright (C) 2018 by morkt): the index's ChaCha20 and serialized object tree, and the
-// per-entry filter. Ported for ShioriKrkr; see shiori_hx.h and PROVENANCE.md.
+// per-entry filter. Ported for ShioriKrkr; see shiori_hx.h and README.md (Licences).
 #include "shiori_hx.h"
 
 #include <algorithm>
@@ -301,7 +301,7 @@ std::u16string hxEntryName(uint64_t id) {
 // Written from the algorithms' specifications (SipHash: Aumasson & Bernstein, "SipHash: a fast
 // short-input PRF", 2012; BLAKE2s: RFC 7693). How Hx applies them (UTF-16LE, the "xp3hnp"
 // suffix, directories with their trailing slash, the root as the suffix alone) is published
-// knowledge about the format; see PROVENANCE.md.
+// knowledge about the format; see README.md (Licences).
 
 uint64_t sipHash24(const uint8_t key[16], const uint8_t *m, size_t size) {
     auto rotl64 = [](uint64_t v, int n) { return (v << n) | (v >> (64 - n)); };

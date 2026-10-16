@@ -2,11 +2,10 @@
  * If a copy of the MPL was not distributed with this file, You can obtain one at
  * https://mozilla.org/MPL/2.0/. */
 
-/* ShioriKrkr: Shiori's own KiriKiri engine (krkr2's core at AetherKrkr's fork point with
- * Shiori's own environment, Metal compositor and plug-ins; see
- * Packages/ShioriKrkrKit/PROVENANCE.md). This is the whole interface the framework exports;
+/* ShioriKrkr: Shiori's own KiriKiri engine (krkr2's core at commit 3ac366c with
+ * Shiori's own environment, Metal compositor and plug-ins). This is the whole interface the framework exports;
  * every krkr2, TJS2 and dependency symbol stays inside ShioriKrkr.framework, so it can sit in
- * the same process as AetherKrkr (ShioriKiriKiri.framework) and Ren'Py's SDL2.
+ * the same process as other engines and Ren'Py's SDL2.
  *
  * Threading: every call is made on the thread that called shiorikrkr_start (the main
  * thread in the app). One game per process lifetime for now: the engine's globals aren't

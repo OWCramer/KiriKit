@@ -5,7 +5,7 @@
 // ShioriKrkr's movies: krkrsdl3's platform video players (environ/PlatformVideo.h) written for
 // Shiori on its LGPL FFmpeg (the ASF demuxer and WMV 9 / WMA 2 decoders, as for CatSystem2).
 // Written fresh; nothing comes from krkrsdl3's own movie code or Kirikiroid2's (Kodi's
-// VideoPlayer lineage), see PROVENANCE.md.
+// VideoPlayer lineage), see README.md (Licences).
 #pragma once
 
 #include <cstdint>

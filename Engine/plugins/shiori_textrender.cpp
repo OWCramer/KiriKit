@@ -12,7 +12,7 @@
 // getCharacters() and paces them with each one's delay (calcShowCount, getKeyWait).
 //
 // 3c1u/TextRender (Apache-2.0 / MIT) was read for the shape of the result dictionaries; no
-// code from krkrsdl3's, krkr2's or AetherKrkr's textrender is in here.
+// code from krkrsdl3's or krkr2's textrender is in here.
 #include "tjsCommHead.h"
 #include <ncbind.hpp>
 #include "tjsArray.h"
@@ -850,8 +850,7 @@ static tjs_error ShioriTextRenderFactory(ShioriTextRender **result, tjs_int coun
 #define SHIORI_TR_PROPERTY(name) NCB_PROPERTY(name, get_##name, set_##name)
 
 // textrender.dll 2.x's link regions (in-text cross references; JAPANESE SCHOOL LIFE's tips ask
-// for them). The link markup isn't known, so no text makes links: an empty list, no rectangles
-// (the user's design from his AetherKrkr patch 0016).
+// for them). The link markup isn't known, so no text makes links: an empty list, no rectangles.
 static tjs_error ShioriTextRenderLinkNames(tTJSVariant *result, tjs_int, tTJSVariant **, ShioriTextRender *) {
     if (result) {
         iTJSDispatch2 *array = TJSCreateArrayObject();
