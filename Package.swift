@@ -23,10 +23,8 @@ let package = Package(
     ],
     targets: [
         .target(name: "CKiriKit"),
-        // Drawn every frame for every character: optimised even in Debug.
         .target(name: "KiriKit",
-                dependencies: ["CKiriKit", .product(name: "CatSystemKit", package: "CatSystemKit")],
-                swiftSettings: [.unsafeFlags(["-O"])]),
+                dependencies: ["CKiriKit", .product(name: "CatSystemKit", package: "CatSystemKit")]),
         .target(name: "KiriKitEmoteHarness", dependencies: ["KiriKit", "CKiriKit"]),
     ]
 )
